@@ -1,0 +1,333 @@
+package mirror
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"git-bridge/internal/config"
+	"git-bridge/internal/notify"
+	"git-bridge/internal/provider"
+)
+
+const defaultWorkDir = "/tmp/git-bridge"
+
+// GitRunner executes git clone/push operations.
+type GitRunner interface {
+	CloneMirror(ctx context.Context, url, dir string) error
+	// PushMirror pushes branches and tags. Returns (true, nil) if changes were pushed,
+	// (false, nil) if already up-to-date, or (false, err) on failure.
+	PushMirror(ctx context.Context, dir, url string) (changed bool, err error)
+	DeleteRef(ctx context.Context, workDir, url, refType, refName string) error
+}
+
+// Service handles git mirror operations.
+type Service struct {
+	configs        []config.RepoConfig
+	providers      map[string]provider.Provider
+	notifier       notify.Notifier
+	workDir        string
+	git            GitRunner
+	timeoutSeconds int
+	repoLocks      map[string]*sync.Mutex
+	repoLocksMu    sync.Mutex
+}
+
+// defaultGitRunner executes real git commands.
+type defaultGitRunner struct{}
+
+func (d *defaultGitRunner) CloneMirror(ctx context.Context, url, dir string) error {
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("cleanup before clone: %w", err)
+	}
+	cmd := exec.CommandContext(ctx, "git", "clone", "--mirror", url, dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%w: %s", err, string(out))
+	}
+	return nil
+}
+
+func (d *defaultGitRunner) PushMirror(ctx context.Context, dir, url string) (bool, error) {
+	changed := false
+
+	// Push all branches
+	pushAll := exec.CommandContext(ctx, "git", "-C", dir, "push", "--force", "--all", url)
+	outAll, err := pushAll.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("push branches: %w: %s", err, string(outAll))
+	}
+	if !isUpToDate(string(outAll)) {
+		changed = true
+	}
+
+	// Push all tags
+	pushTags := exec.CommandContext(ctx, "git", "-C", dir, "push", "--force", "--tags", url)
+	outTags, err := pushTags.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("push tags: %w: %s", err, string(outTags))
+	}
+	if !isUpToDate(string(outTags)) {
+		changed = true
+	}
+
+	return changed, nil
+}
+
+// isUpToDate returns true if git push output indicates no changes were pushed.
+func isUpToDate(output string) bool {
+	trimmed := strings.TrimSpace(output)
+	return trimmed == "" || strings.Contains(trimmed, "Everything up-to-date")
+}
+
+func (d *defaultGitRunner) DeleteRef(ctx context.Context, workDir, url, refType, refName string) error {
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		return fmt.Errorf("create work dir: %w", err)
+	}
+	initCmd := exec.CommandContext(ctx, "git", "init", "--bare", workDir)
+	if err := initCmd.Run(); err != nil {
+		return fmt.Errorf("git init: %w", err)
+	}
+
+	var ref string
+	if refType == "tag" {
+		ref = "refs/tags/" + refName
+	} else {
+		ref = "refs/heads/" + refName
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "-C", workDir, "push", url, ":"+ref)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("push delete ref: %w: %s", err, string(out))
+	}
+	return nil
+}
+
+// New creates a mirror service. Returns an error if any configured provider fails to initialize.
+func New(cfg *config.Config, notifier notify.Notifier) (*Service, error) {
+	providers := make(map[string]provider.Provider)
+	for name, pcfg := range cfg.Providers {
+		p, err := provider.New(name, pcfg)
+		if err != nil {
+			return nil, fmt.Errorf("provider %q: %w", name, err)
+		}
+		providers[name] = p
+	}
+
+	workDir := os.Getenv("WORK_DIR")
+	if workDir == "" {
+		workDir = defaultWorkDir
+	}
+
+	return &Service{
+		configs:        cfg.Repos,
+		providers:      providers,
+		notifier:       notifier,
+		workDir:        workDir,
+		git:            &defaultGitRunner{},
+		timeoutSeconds: cfg.Mirror.TimeoutSeconds,
+		repoLocks:      make(map[string]*sync.Mutex),
+	}, nil
+}
+
+// allowsSourceToTarget returns true if direction permits source → target sync.
+func allowsSourceToTarget(direction string) bool {
+	dir := strings.ToLower(direction)
+	return dir == "source-to-target" || dir == "bidirectional"
+}
+
+// allowsTargetToSource returns true if direction permits target → source sync.
+func allowsTargetToSource(direction string) bool {
+	dir := strings.ToLower(direction)
+	return dir == "target-to-source" || dir == "bidirectional"
+}
+
+// Sync mirrors a repository triggered by source-side event (e.g. CodeCommit → SQS).
+// repoName is the source_path of the repo.
+func (s *Service) Sync(ctx context.Context, repoName string) error {
+	for _, repoCfg := range s.configs {
+		if repoCfg.SourcePath != repoName {
+			continue
+		}
+		if allowsSourceToTarget(repoCfg.Direction) {
+			return s.doMirror(ctx, repoCfg, repoCfg.Source, repoCfg.SourcePath, repoCfg.Target, repoCfg.TargetPath)
+		}
+		return fmt.Errorf("repo %q direction %q does not allow source-to-target sync", repoName, repoCfg.Direction)
+	}
+	return fmt.Errorf("repo %q not configured for mirroring", repoName)
+}
+
+// SyncByTarget mirrors a repository triggered by target-side event (e.g. GitLab/GitHub webhook).
+// providerName is the provider type, repoPath is the target_path of the repo.
+func (s *Service) SyncByTarget(ctx context.Context, providerName, repoPath string) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.timeoutSeconds)*time.Second)
+	defer cancel()
+	for _, repoCfg := range s.configs {
+		// Match by target provider + target path
+		tgtProvider, ok := s.providers[repoCfg.Target]
+		if !ok {
+			continue
+		}
+		if tgtProvider.Type() == providerName && repoCfg.TargetPath == repoPath {
+			if allowsTargetToSource(repoCfg.Direction) {
+				return s.doMirror(ctx, repoCfg, repoCfg.Target, repoCfg.TargetPath, repoCfg.Source, repoCfg.SourcePath)
+			}
+			return fmt.Errorf("repo %q direction %q does not allow target-to-source sync", repoCfg.Name, repoCfg.Direction)
+		}
+
+		// Match by source provider + source path (for source-side webhook)
+		srcProvider, ok := s.providers[repoCfg.Source]
+		if !ok {
+			continue
+		}
+		if srcProvider.Type() == providerName && repoCfg.SourcePath == repoPath {
+			if allowsSourceToTarget(repoCfg.Direction) {
+				return s.doMirror(ctx, repoCfg, repoCfg.Source, repoCfg.SourcePath, repoCfg.Target, repoCfg.TargetPath)
+			}
+			return fmt.Errorf("repo %q direction %q does not allow source-to-target sync", repoCfg.Name, repoCfg.Direction)
+		}
+	}
+	return fmt.Errorf("no matching repo for provider=%q path=%q", providerName, repoPath)
+}
+
+// SyncDelete deletes a ref from the target triggered by source-side delete event.
+func (s *Service) SyncDelete(ctx context.Context, repoName, refType, refName string) error {
+	for _, repoCfg := range s.configs {
+		if repoCfg.SourcePath != repoName {
+			continue
+		}
+		if allowsSourceToTarget(repoCfg.Direction) {
+			return s.doDeleteRef(ctx, repoCfg, repoCfg.Target, repoCfg.TargetPath, refType, refName)
+		}
+		return fmt.Errorf("repo %q direction %q does not allow source-to-target sync", repoName, repoCfg.Direction)
+	}
+	return fmt.Errorf("repo %q not configured for mirroring", repoName)
+}
+
+// repoLock returns a per-repo mutex, creating one if needed.
+func (s *Service) repoLock(repoName string) *sync.Mutex {
+	s.repoLocksMu.Lock()
+	defer s.repoLocksMu.Unlock()
+	if mu, ok := s.repoLocks[repoName]; ok {
+		return mu
+	}
+	mu := &sync.Mutex{}
+	s.repoLocks[repoName] = mu
+	return mu
+}
+
+// doDeleteRef deletes a specific branch or tag from the target.
+func (s *Service) doDeleteRef(ctx context.Context, repoCfg config.RepoConfig, toProvider, toPath, refType, refName string) error {
+	mu := s.repoLock(repoCfg.Name)
+	mu.Lock()
+	defer mu.Unlock()
+
+	tgt, ok := s.providers[toProvider]
+	if !ok {
+		return fmt.Errorf("provider %q not found", toProvider)
+	}
+
+	tgtURL := tgt.CloneURL(toPath)
+	logger := slog.With("repo", repoCfg.Name, "target", tgt.Type()+"/"+toPath, "ref", refType+"/"+refName)
+
+	deleteDir := filepath.Join(s.workDir, repoCfg.Name+"-delete.git")
+	defer os.RemoveAll(deleteDir)
+
+	logger.Info("deleting ref from target")
+	if err := s.git.DeleteRef(ctx, deleteDir, tgtURL, refType, refName); err != nil {
+		s.notifier.Send(notify.Message{
+			Level: "error",
+			Title: fmt.Sprintf("Ref Delete Failed: %s", repoCfg.Name),
+			Body:  fmt.Sprintf("Action: delete %s '%s'\nTarget: %s/%s\nError: %v", refType, refName, tgt.Type(), toPath, err),
+		})
+		return fmt.Errorf("delete ref: %w", err)
+	}
+
+	logger.Info("ref deleted from target")
+	s.notifier.Send(notify.Message{
+		Level: "success",
+		Title: fmt.Sprintf("Ref Deleted: %s", repoCfg.Name),
+		Body:  fmt.Sprintf("Action: delete %s '%s'\nTarget: %s/%s\nURL: %s", refType, refName, tgt.Type(), toPath, tgt.WebURL(toPath)),
+	})
+	return nil
+}
+
+// doMirror performs the actual git clone --mirror + git push --mirror.
+func (s *Service) doMirror(ctx context.Context, repoCfg config.RepoConfig, fromProvider, fromPath, toProvider, toPath string) error {
+	mu := s.repoLock(repoCfg.Name)
+	mu.Lock()
+	defer mu.Unlock()
+
+	src, ok := s.providers[fromProvider]
+	if !ok {
+		return fmt.Errorf("provider %q not found", fromProvider)
+	}
+	tgt, ok := s.providers[toProvider]
+	if !ok {
+		return fmt.Errorf("provider %q not found", toProvider)
+	}
+
+	start := time.Now()
+	srcURL := src.CloneURL(fromPath)
+	tgtURL := tgt.CloneURL(toPath)
+
+	logger := slog.With(
+		"repo", repoCfg.Name,
+		"from", src.Type()+"/"+fromPath,
+		"to", tgt.Type()+"/"+toPath,
+	)
+
+	mirrorDir := filepath.Join(s.workDir, repoCfg.Name+"-"+src.Type()+".git")
+	defer os.RemoveAll(mirrorDir)
+
+	route := fmt.Sprintf("%s/%s → %s/%s", src.Type(), fromPath, tgt.Type(), toPath)
+
+	// Clone from source
+	logger.Info("cloning from source")
+	if err := s.git.CloneMirror(ctx, srcURL, mirrorDir); err != nil {
+		s.notifier.Send(notify.Message{
+			Level: "error",
+			Title: fmt.Sprintf("Mirror Sync Failed: %s", repoCfg.Name),
+			Body:  fmt.Sprintf("Action: clone\nRoute: %s\nError: %v", route, err),
+		})
+		return fmt.Errorf("clone: %w", err)
+	}
+
+	// Push to target
+	logger.Info("pushing to target")
+	changed, err := s.git.PushMirror(ctx, mirrorDir, tgtURL)
+	if err != nil {
+		s.notifier.Send(notify.Message{
+			Level: "error",
+			Title: fmt.Sprintf("Mirror Sync Failed: %s", repoCfg.Name),
+			Body:  fmt.Sprintf("Action: push\nRoute: %s\nError: %v", route, err),
+		})
+		return fmt.Errorf("push: %w", err)
+	}
+
+	elapsed := time.Since(start)
+
+	if !changed {
+		logger.Info("already up-to-date, skipping notification", "duration", elapsed.String())
+		return nil
+	}
+
+	logger.Info("mirror sync done", "duration", elapsed.String())
+
+	s.notifier.Send(notify.Message{
+		Level: "success",
+		Title: fmt.Sprintf("Mirror Sync: %s", repoCfg.Name),
+		Body: fmt.Sprintf("Action: branches + tags synced\nRoute: %s\nDuration: %s\nTarget: %s",
+			route,
+			elapsed.Round(time.Millisecond),
+			tgt.WebURL(toPath)),
+	})
+
+	return nil
+}
+

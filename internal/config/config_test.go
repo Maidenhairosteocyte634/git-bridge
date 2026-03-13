@@ -1,0 +1,571 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestLoad_ValidConfig(t *testing.T) {
+	content := `
+server:
+  port: 9090
+providers:
+  codecommit-eu:
+    type: codecommit
+    region: eu-central-1
+    credentials:
+      git_username: user
+      git_password: pass
+  gitlab-main:
+    type: gitlab
+    base_url: http://gitlab.example.com
+    credentials:
+      token: glpat-test
+repos:
+  - name: test-repo
+    source: codecommit-eu
+    target: gitlab-main
+    source_path: test-repo
+    target_path: team/test-repo
+    direction: source-to-target
+consumer:
+  type: sqs
+  queue_url: https://sqs.eu-central-1.amazonaws.com/123456/test-queue
+  region: eu-central-1
+  credentials:
+    access_key: AKIA_TEST
+    secret_key: secret_test
+notification:
+  slack:
+    webhook_url: ""
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Server.Port != 9090 {
+		t.Errorf("port = %d, want 9090", cfg.Server.Port)
+	}
+	if len(cfg.Providers) != 2 {
+		t.Errorf("providers = %d, want 2", len(cfg.Providers))
+	}
+	if len(cfg.Repos) != 1 {
+		t.Errorf("repos = %d, want 1", len(cfg.Repos))
+	}
+	if cfg.Repos[0].Direction != "source-to-target" {
+		t.Errorf("direction = %q, want source-to-target", cfg.Repos[0].Direction)
+	}
+	if len(cfg.Consumers) != 1 {
+		t.Fatalf("consumers = %d, want 1", len(cfg.Consumers))
+	}
+	if cfg.Consumers[0].QueueURL != "https://sqs.eu-central-1.amazonaws.com/123456/test-queue" {
+		t.Errorf("queue_url mismatch")
+	}
+	if cfg.Consumers[0].Name != "default" {
+		t.Errorf("consumer name = %q, want default", cfg.Consumers[0].Name)
+	}
+}
+
+func TestLoad_DefaultPort(t *testing.T) {
+	content := `
+providers:
+  cc:
+    type: codecommit
+    region: us-east-1
+    credentials:
+      git_username: u
+      git_password: p
+  gl:
+    type: gitlab
+    base_url: http://gl.test
+    credentials:
+      token: tok
+repos:
+  - name: r
+    source: cc
+    target: gl
+    source_path: r
+    target_path: r
+    direction: bidirectional
+consumer:
+  queue_url: https://sqs.test/q
+  region: us-east-1
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Server.Port != 8080 {
+		t.Errorf("default port = %d, want 8080", cfg.Server.Port)
+	}
+	if len(cfg.Consumers) != 1 || cfg.Consumers[0].Type != "sqs" {
+		t.Errorf("consumer type = %q, want sqs", cfg.Consumers[0].Type)
+	}
+}
+
+func TestLoad_EnvVarExpansion(t *testing.T) {
+	t.Setenv("TEST_GIT_USER", "expanded-user")
+	t.Setenv("TEST_GIT_PASS", "expanded-pass")
+
+	content := `
+providers:
+  cc:
+    type: codecommit
+    region: eu-central-1
+    credentials:
+      git_username: ${TEST_GIT_USER}
+      git_password: ${TEST_GIT_PASS}
+  gl:
+    type: gitlab
+    base_url: http://gl.test
+    credentials:
+      token: tok
+repos:
+  - name: r
+    source: cc
+    target: gl
+    source_path: r
+    target_path: r
+    direction: source-to-target
+consumer:
+  queue_url: https://sqs.test/q
+  region: eu-central-1
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	creds := cfg.Providers["cc"].Credentials
+	if creds["git_username"] != "expanded-user" {
+		t.Errorf("git_username = %q, want expanded-user", creds["git_username"])
+	}
+	if creds["git_password"] != "expanded-pass" {
+		t.Errorf("git_password = %q, want expanded-pass", creds["git_password"])
+	}
+}
+
+func TestLoad_NoRepos(t *testing.T) {
+	content := `
+providers:
+  cc:
+    type: codecommit
+    region: us-east-1
+    credentials: {}
+repos: []
+consumer:
+  queue_url: https://sqs.test/q
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for no repos")
+	}
+}
+
+func TestLoad_InvalidDirection(t *testing.T) {
+	content := `
+providers:
+  cc:
+    type: codecommit
+    region: us-east-1
+    credentials: {}
+  gl:
+    type: gitlab
+    base_url: http://gl.test
+    credentials: {}
+repos:
+  - name: r
+    source: cc
+    target: gl
+    source_path: r
+    target_path: r
+    direction: invalid
+consumer:
+  queue_url: https://sqs.test/q
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid direction")
+	}
+}
+
+func TestLoad_UnknownProvider(t *testing.T) {
+	content := `
+providers:
+  cc:
+    type: codecommit
+    region: us-east-1
+    credentials: {}
+repos:
+  - name: r
+    source: cc
+    target: nonexistent
+    source_path: r
+    target_path: r
+    direction: source-to-target
+consumer:
+  queue_url: https://sqs.test/q
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for unknown target provider")
+	}
+}
+
+func TestLoad_FileNotFound(t *testing.T) {
+	_, err := Load("/tmp/nonexistent-config.yaml")
+	if err == nil {
+		t.Fatal("expected error for missing file")
+	}
+}
+
+func TestLoad_InvalidYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte("{{invalid yaml"), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid YAML")
+	}
+}
+
+func TestLoad_RepoNameEmpty(t *testing.T) {
+	content := `
+providers:
+  cc:
+    type: codecommit
+    region: us-east-1
+    credentials: {}
+  gl:
+    type: gitlab
+    base_url: http://gl.test
+    credentials: {}
+repos:
+  - name: ""
+    source: cc
+    target: gl
+    source_path: r
+    target_path: r
+    direction: source-to-target
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for empty repo name")
+	}
+}
+
+func TestLoad_RepoSourceEmpty(t *testing.T) {
+	content := `
+providers:
+  cc:
+    type: codecommit
+    region: us-east-1
+    credentials: {}
+repos:
+  - name: r
+    source: ""
+    target: cc
+    source_path: r
+    target_path: r
+    direction: source-to-target
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for empty source")
+	}
+}
+
+func TestLoad_UnknownSourceProvider(t *testing.T) {
+	content := `
+providers:
+  gl:
+    type: gitlab
+    base_url: http://gl.test
+    credentials: {}
+repos:
+  - name: r
+    source: nonexistent
+    target: gl
+    source_path: r
+    target_path: r
+    direction: source-to-target
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for unknown source provider")
+	}
+}
+
+func TestLoad_EnvVarNotSet(t *testing.T) {
+	content := `
+providers:
+  cc:
+    type: codecommit
+    region: us-east-1
+    credentials:
+      git_username: ${UNSET_VAR_12345}
+      git_password: pass
+  gl:
+    type: gitlab
+    base_url: http://gl.test
+    credentials:
+      token: tok
+repos:
+  - name: r
+    source: cc
+    target: gl
+    source_path: r
+    target_path: r
+    direction: source-to-target
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Unset env vars should be preserved as literal
+	if cfg.Providers["cc"].Credentials["git_username"] != "${UNSET_VAR_12345}" {
+		t.Errorf("expected literal ${UNSET_VAR_12345}, got %q", cfg.Providers["cc"].Credentials["git_username"])
+	}
+}
+
+func TestLoad_SQSOptional(t *testing.T) {
+	content := `
+providers:
+  gl:
+    type: gitlab
+    base_url: http://gl.test
+    credentials:
+      token: tok
+  gh:
+    type: github
+    credentials:
+      token: tok
+repos:
+  - name: r
+    source: gl
+    target: gh
+    source_path: team/r
+    target_path: org/r
+    direction: bidirectional
+consumer:
+  queue_url: ""
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Consumers) != 0 {
+		t.Errorf("consumers should be empty, got %d", len(cfg.Consumers))
+	}
+}
+
+func TestLoad_MultipleConsumers(t *testing.T) {
+	content := `
+providers:
+  gitlab-main:
+    type: gitlab
+    base_url: http://gl.test
+    credentials:
+      token: tok
+  github-main:
+    type: github
+    credentials:
+      token: tok
+  codecommit-us:
+    type: codecommit
+    region: us-east-1
+    credentials:
+      git_username: u1
+      git_password: p1
+  codecommit-eu:
+    type: codecommit
+    region: eu-central-1
+    credentials:
+      git_username: u2
+      git_password: p2
+repos:
+  - name: repo-us
+    source: codecommit-us
+    target: gitlab-main
+    source_path: repo-us
+    target_path: team/repo-us
+    direction: source-to-target
+  - name: repo-eu
+    source: codecommit-eu
+    target: github-main
+    source_path: repo-eu
+    target_path: org/repo-eu
+    direction: source-to-target
+consumers:
+  - name: sqs-us
+    type: sqs
+    queue_url: https://sqs.us-east-1.amazonaws.com/111111/queue-us
+    region: us-east-1
+    credentials:
+      access_key: AKIA_US
+      secret_key: secret_us
+  - name: sqs-eu
+    type: sqs
+    queue_url: https://sqs.eu-central-1.amazonaws.com/222222/queue-eu
+    region: eu-central-1
+    credentials:
+      access_key: AKIA_EU
+      secret_key: secret_eu
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Consumers) != 2 {
+		t.Fatalf("consumers = %d, want 2", len(cfg.Consumers))
+	}
+	if cfg.Consumers[0].Name != "sqs-us" {
+		t.Errorf("consumer[0] name = %q, want sqs-us", cfg.Consumers[0].Name)
+	}
+	if cfg.Consumers[0].Region != "us-east-1" {
+		t.Errorf("consumer[0] region = %q, want us-east-1", cfg.Consumers[0].Region)
+	}
+	if cfg.Consumers[1].Name != "sqs-eu" {
+		t.Errorf("consumer[1] name = %q, want sqs-eu", cfg.Consumers[1].Name)
+	}
+	if cfg.Consumers[1].Region != "eu-central-1" {
+		t.Errorf("consumer[1] region = %q, want eu-central-1", cfg.Consumers[1].Region)
+	}
+}
+
+func TestLoad_DuplicateConsumerName(t *testing.T) {
+	content := `
+providers:
+  gl:
+    type: gitlab
+    base_url: http://gl.test
+    credentials:
+      token: tok
+  cc:
+    type: codecommit
+    region: us-east-1
+    credentials:
+      git_username: u
+      git_password: p
+repos:
+  - name: r
+    source: cc
+    target: gl
+    source_path: r
+    target_path: r
+    direction: source-to-target
+consumers:
+  - name: same-name
+    queue_url: https://sqs.us-east-1.amazonaws.com/111/q1
+    region: us-east-1
+  - name: same-name
+    queue_url: https://sqs.eu-central-1.amazonaws.com/222/q2
+    region: eu-central-1
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for duplicate consumer names")
+	}
+}
+
+func TestLoad_LegacyConsumerBackwardCompat(t *testing.T) {
+	content := `
+providers:
+  cc:
+    type: codecommit
+    region: us-east-1
+    credentials:
+      git_username: u
+      git_password: p
+  gl:
+    type: gitlab
+    base_url: http://gl.test
+    credentials:
+      token: tok
+repos:
+  - name: r
+    source: cc
+    target: gl
+    source_path: r
+    target_path: r
+    direction: source-to-target
+consumer:
+  type: sqs
+  queue_url: https://sqs.us-east-1.amazonaws.com/123/q
+  region: us-east-1
+  credentials:
+    access_key: AKIA
+    secret_key: secret
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Legacy consumer should be merged into consumers
+	if len(cfg.Consumers) != 1 {
+		t.Fatalf("consumers = %d, want 1", len(cfg.Consumers))
+	}
+	if cfg.Consumers[0].Name != "default" {
+		t.Errorf("name = %q, want default", cfg.Consumers[0].Name)
+	}
+	if cfg.Consumers[0].Credentials.AccessKey != "AKIA" {
+		t.Errorf("access_key = %q, want AKIA", cfg.Consumers[0].Credentials.AccessKey)
+	}
+}

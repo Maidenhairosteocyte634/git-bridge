@@ -1,0 +1,31 @@
+# Binary
+bin/
+git-bridge
+
+# Coverage
+coverage.out
+coverage.html
+
+# Git
+.git
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# K8s manifests
+k8s/
+
+# Docs
+docs/
+README.md
+
+# Config with secrets
+examples/config.local.yaml
+
+# CI
+.gitlab-ci.yml

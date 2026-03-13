@@ -1,0 +1,366 @@
+package consumer
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
+
+// mockMirrorer is a no-op mock for testing webhook handlers.
+type mockMirrorer struct{}
+
+func (m *mockMirrorer) SyncByTarget(_ context.Context, providerName, repoPath string) error {
+	return nil
+}
+
+// signPayload generates a GitHub-style HMAC-SHA256 signature for the given payload.
+func signPayload(payload []byte, secret string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(payload)
+	return fmt.Sprintf("sha256=%s", hex.EncodeToString(mac.Sum(nil)))
+}
+
+func TestGitLabHandler_ValidPush(t *testing.T) {
+	wh := NewWebhook(context.Background(), &mockMirrorer{},"", "")
+
+	payload := GitLabPushEvent{
+		EventName: "push",
+		Ref:       "refs/heads/main",
+	}
+	payload.Project.PathWithNamespace = "team/test-repo"
+	payload.Repository.Name = "test-repo"
+
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/gitlab", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	wh.GitLabHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestGitLabHandler_InvalidToken(t *testing.T) {
+	wh := NewWebhook(context.Background(), &mockMirrorer{},"correct-secret", "")
+
+	payload := GitLabPushEvent{}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/gitlab", bytes.NewReader(body))
+	req.Header.Set("X-Gitlab-Token", "wrong-secret")
+	w := httptest.NewRecorder()
+
+	wh.GitLabHandler(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestGitLabHandler_ValidToken(t *testing.T) {
+	wh := NewWebhook(context.Background(), &mockMirrorer{},"my-secret", "")
+
+	payload := GitLabPushEvent{Ref: "refs/heads/main"}
+	payload.Project.PathWithNamespace = "team/test-repo"
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/gitlab", bytes.NewReader(body))
+	req.Header.Set("X-Gitlab-Token", "my-secret")
+	w := httptest.NewRecorder()
+
+	wh.GitLabHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestGitLabHandler_MethodNotAllowed(t *testing.T) {
+	wh := NewWebhook(context.Background(), &mockMirrorer{},"", "")
+
+	req := httptest.NewRequest(http.MethodGet, "/webhook/gitlab", nil)
+	w := httptest.NewRecorder()
+
+	wh.GitLabHandler(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", w.Code)
+	}
+}
+
+func TestGitLabHandler_InvalidBody(t *testing.T) {
+	wh := NewWebhook(context.Background(), &mockMirrorer{},"", "")
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/gitlab", bytes.NewReader([]byte("not json")))
+	w := httptest.NewRecorder()
+
+	wh.GitLabHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestGitHubHandler_ValidPush(t *testing.T) {
+	wh := NewWebhook(context.Background(), &mockMirrorer{},"", "")
+
+	payload := GitHubPushEvent{Ref: "refs/heads/main"}
+	payload.Repository.Name = "test-repo"
+	payload.Repository.FullName = "org/test-repo"
+
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	wh.GitHubHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestGitHubHandler_ValidHMAC(t *testing.T) {
+	secret := "my-secret"
+	wh := NewWebhook(context.Background(), &mockMirrorer{},"", secret)
+
+	payload := GitHubPushEvent{Ref: "refs/heads/main"}
+	payload.Repository.Name = "test-repo"
+	payload.Repository.FullName = "org/test-repo"
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+	req.Header.Set("X-Hub-Signature-256", signPayload(body, secret))
+	w := httptest.NewRecorder()
+
+	wh.GitHubHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestGitHubHandler_InvalidHMAC(t *testing.T) {
+	wh := NewWebhook(context.Background(), &mockMirrorer{},"", "correct-secret")
+
+	payload := GitHubPushEvent{}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+	req.Header.Set("X-Hub-Signature-256", "sha256=invalid")
+	w := httptest.NewRecorder()
+
+	wh.GitHubHandler(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestGitHubHandler_MissingSignature(t *testing.T) {
+	wh := NewWebhook(context.Background(), &mockMirrorer{},"", "my-secret")
+
+	payload := GitHubPushEvent{}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+	// No X-Hub-Signature-256 header
+	w := httptest.NewRecorder()
+
+	wh.GitHubHandler(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestGitHubHandler_MethodNotAllowed(t *testing.T) {
+	wh := NewWebhook(context.Background(), &mockMirrorer{},"", "")
+
+	req := httptest.NewRequest(http.MethodGet, "/webhook/github", nil)
+	w := httptest.NewRecorder()
+
+	wh.GitHubHandler(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", w.Code)
+	}
+}
+
+func TestGitHubHandler_InvalidBody(t *testing.T) {
+	wh := NewWebhook(context.Background(), &mockMirrorer{},"", "")
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader([]byte("{invalid")))
+	w := httptest.NewRecorder()
+
+	wh.GitHubHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestGitHubHandler_NoSecretSkipsVerification(t *testing.T) {
+	wh := NewWebhook(context.Background(), &mockMirrorer{},"", "")
+
+	payload := GitHubPushEvent{Ref: "refs/heads/main"}
+	payload.Repository.Name = "test-repo"
+	payload.Repository.FullName = "org/test-repo"
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	wh.GitHubHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (skip verification when secret empty)", w.Code)
+	}
+}
+
+func TestGitLabHandler_NoSecretSkipsVerification(t *testing.T) {
+	wh := NewWebhook(context.Background(), &mockMirrorer{},"", "")
+
+	payload := GitLabPushEvent{Ref: "refs/heads/main"}
+	payload.Project.PathWithNamespace = "team/test-repo"
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/gitlab", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	wh.GitLabHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (skip verification when secret empty)", w.Code)
+	}
+}
+
+// --- goroutine coverage: verify SyncByTarget is called ---
+
+type trackingMirrorer struct {
+	called chan string
+	err    error
+}
+
+func (m *trackingMirrorer) SyncByTarget(_ context.Context, providerName, repoPath string) error {
+	m.called <- providerName + "/" + repoPath
+	return m.err
+}
+
+func TestGitLabHandler_SyncByTargetCalled(t *testing.T) {
+	mock := &trackingMirrorer{called: make(chan string, 1)}
+	wh := NewWebhook(context.Background(), mock, "", "")
+
+	payload := GitLabPushEvent{Ref: "refs/heads/main"}
+	payload.Project.PathWithNamespace = "team/test-repo"
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/gitlab", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	wh.GitLabHandler(w, req)
+
+	select {
+	case got := <-mock.called:
+		if got != "gitlab/team/test-repo" {
+			t.Errorf("unexpected call: %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SyncByTarget was not called")
+	}
+}
+
+func TestGitHubHandler_SyncByTargetCalled(t *testing.T) {
+	mock := &trackingMirrorer{called: make(chan string, 1)}
+	wh := NewWebhook(context.Background(), mock, "", "")
+
+	payload := GitHubPushEvent{Ref: "refs/heads/main"}
+	payload.Repository.FullName = "org/test-repo"
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	wh.GitHubHandler(w, req)
+
+	select {
+	case got := <-mock.called:
+		if got != "github/org/test-repo" {
+			t.Errorf("unexpected call: %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SyncByTarget was not called")
+	}
+}
+
+func TestGitLabHandler_SyncByTargetError(t *testing.T) {
+	mock := &trackingMirrorer{called: make(chan string, 1), err: fmt.Errorf("sync failed")}
+	wh := NewWebhook(context.Background(), mock, "", "")
+
+	payload := GitLabPushEvent{Ref: "refs/heads/main"}
+	payload.Project.PathWithNamespace = "team/err-repo"
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/gitlab", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	wh.GitLabHandler(w, req)
+
+	// Response should still be 200 (async)
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+
+	select {
+	case <-mock.called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SyncByTarget was not called")
+	}
+}
+
+func TestGitHubHandler_SyncByTargetError(t *testing.T) {
+	mock := &trackingMirrorer{called: make(chan string, 1), err: fmt.Errorf("sync failed")}
+	wh := NewWebhook(context.Background(), mock, "", "")
+
+	payload := GitHubPushEvent{Ref: "refs/heads/main"}
+	payload.Repository.FullName = "org/err-repo"
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	wh.GitHubHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+
+	select {
+	case <-mock.called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SyncByTarget was not called")
+	}
+}
+
+func TestVerifyGitHubSignature(t *testing.T) {
+	secret := "test-secret"
+	payload := []byte(`{"ref":"refs/heads/main"}`)
+
+	validSig := signPayload(payload, secret)
+	if !verifyGitHubSignature(payload, secret, validSig) {
+		t.Error("valid signature should pass verification")
+	}
+
+	if verifyGitHubSignature(payload, secret, "sha256=wrong") {
+		t.Error("invalid signature should fail verification")
+	}
+
+	if verifyGitHubSignature(payload, secret, "") {
+		t.Error("empty signature should fail verification")
+	}
+
+	if verifyGitHubSignature(payload, "wrong-secret", validSig) {
+		t.Error("wrong secret should fail verification")
+	}
+}
