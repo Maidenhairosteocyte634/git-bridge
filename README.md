@@ -14,19 +14,19 @@ Supports CodeCommit, GitLab, GitHub with any-to-any mirroring via SQS polling an
                          Event Sources                          Git-Bridge                    Targets
                     ┌──────────────────────┐            ┌──────────────────┐
                     │                      │            │                  │
- ┌──────────────┐   │  EventBridge → SQS   │──(poll)──▶│                  │──▶ GitLab
- │  CodeCommit  │──▶│  (referenceUpdated)  │           │                  │
- └──────────────┘   │         + DLQ        │           │                  │──▶ GitHub
-                    └──────────────────────┘           │    Mirror Svc    │
-                                                       │                  │──▶ CodeCommit
- ┌──────────────┐   ┌──────────────────────┐           │  clone → push   │
- │    GitLab    │──▶│  POST /webhook/gitlab│──(http)──▶│                  │──▶ ...
- └──────────────┘   └──────────────────────┘           │                  │
-                                                       │                  │
- ┌──────────────┐   ┌──────────────────────┐           │                  │       ┌───────┐
- │    GitHub    │──▶│  POST /webhook/github│──(http)──▶│                  │──────▶│ Slack │
- └──────────────┘   └──────────────────────┘           │                  │       └───────┘
-                                                       └──────────────────┘
+ ┌──────────────┐   │  EventBridge → SQS   │──(poll)──▶ │                  │──▶ GitLab
+ │  CodeCommit  │──▶│  (referenceUpdated)  │            │                  │
+ └──────────────┘   │         + DLQ        │            │                  │──▶ GitHub
+                    └──────────────────────┘            │    Mirror Svc    │
+                                                        │                  │──▶ CodeCommit
+ ┌──────────────┐   ┌──────────────────────┐            │  clone → push    │
+ │    GitLab    │──▶│  POST /webhook/gitlab│──(http)──▶ │                  │──▶ ...
+ └──────────────┘   └──────────────────────┘            │                  │
+                                                        │                  │
+ ┌──────────────┐   ┌──────────────────────┐            │                  │       ┌───────┐
+ │    GitHub    │──▶│  POST /webhook/github│──(http)──▶ │                  │──────▶│ Slack │
+ └──────────────┘   └──────────────────────┘            │                  │       └───────┘
+                                                        └──────────────────┘
 ```
 
 <br/>
