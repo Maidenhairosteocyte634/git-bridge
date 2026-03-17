@@ -128,7 +128,11 @@ spec:
           configMap:
             name: git-bridge-config
         - name: work
-          emptyDir: {}
+          # Option 1: PVC for persistent mirror cache (recommended for large repos)
+          persistentVolumeClaim:
+            claimName: git-bridge-work
+          # Option 2: emptyDir (no persistence across pod restarts)
+          # emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

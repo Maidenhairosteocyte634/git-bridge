@@ -16,15 +16,22 @@ import (
 // mockGitRunner records calls and returns configurable errors.
 type mockGitRunner struct {
 	cloneCalls     []cloneCall
+	fetchCalls     []fetchCall
 	pushCalls      []pushCall
 	deleteRefCalls []deleteRefCall
 	cloneErr       error
+	fetchErr       error
 	pushErr        error
 	pushChanged    bool // when true, PushMirror reports changes were pushed
 	deleteRefErr   error
 }
 
 type cloneCall struct {
+	URL string
+	Dir string
+}
+
+type fetchCall struct {
 	URL string
 	Dir string
 }
@@ -43,6 +50,11 @@ type deleteRefCall struct {
 func (m *mockGitRunner) CloneMirror(_ context.Context, url, dir string) error {
 	m.cloneCalls = append(m.cloneCalls, cloneCall{URL: url, Dir: dir})
 	return m.cloneErr
+}
+
+func (m *mockGitRunner) FetchMirror(_ context.Context, url, dir string) error {
+	m.fetchCalls = append(m.fetchCalls, fetchCall{URL: url, Dir: dir})
+	return m.fetchErr
 }
 
 func (m *mockGitRunner) PushMirror(_ context.Context, dir, url string) (bool, error) {
@@ -901,6 +913,119 @@ func TestRepoLock_ReturnsSameMutex(t *testing.T) {
 	mu3 := svc.repoLock("repo-b")
 	if mu1 == mu3 {
 		t.Error("expected different mutex for different repo")
+	}
+}
+
+// --- incremental fetch tests ---
+
+func TestDoMirror_IncrementalFetch(t *testing.T) {
+	git := &mockGitRunner{pushChanged: true}
+	notif := &mockNotifier{}
+	svc := newTestService(nil, makeProviders(), notif, git)
+	svc.workDir = t.TempDir()
+
+	// Create a fake bare git dir to simulate existing mirror
+	mirrorDir := svc.workDir + "/test-repo-codecommit.git"
+	os.MkdirAll(mirrorDir, 0o755)
+	os.WriteFile(mirrorDir+"/HEAD", []byte("ref: refs/heads/main\n"), 0o644)
+
+	repoCfg := config.RepoConfig{Name: "test-repo"}
+	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(git.fetchCalls) != 1 {
+		t.Errorf("expected 1 fetch call, got %d", len(git.fetchCalls))
+	}
+	if len(git.cloneCalls) != 0 {
+		t.Errorf("expected 0 clone calls, got %d", len(git.cloneCalls))
+	}
+}
+
+func TestDoMirror_FetchFallbackToClone(t *testing.T) {
+	git := &mockGitRunner{fetchErr: fmt.Errorf("fetch failed"), pushChanged: true}
+	notif := &mockNotifier{}
+	svc := newTestService(nil, makeProviders(), notif, git)
+	svc.workDir = t.TempDir()
+
+	// Create a fake bare git dir
+	mirrorDir := svc.workDir + "/test-repo-codecommit.git"
+	os.MkdirAll(mirrorDir, 0o755)
+	os.WriteFile(mirrorDir+"/HEAD", []byte("ref: refs/heads/main\n"), 0o644)
+
+	repoCfg := config.RepoConfig{Name: "test-repo"}
+	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(git.fetchCalls) != 1 {
+		t.Errorf("expected 1 fetch call, got %d", len(git.fetchCalls))
+	}
+	if len(git.cloneCalls) != 1 {
+		t.Errorf("expected 1 clone call (fallback), got %d", len(git.cloneCalls))
+	}
+}
+
+func TestDoMirror_InitialClone(t *testing.T) {
+	git := &mockGitRunner{pushChanged: true}
+	notif := &mockNotifier{}
+	svc := newTestService(nil, makeProviders(), notif, git)
+	svc.workDir = t.TempDir()
+
+	repoCfg := config.RepoConfig{Name: "test-repo"}
+	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(git.cloneCalls) != 1 {
+		t.Errorf("expected 1 clone call, got %d", len(git.cloneCalls))
+	}
+	if len(git.fetchCalls) != 0 {
+		t.Errorf("expected 0 fetch calls, got %d", len(git.fetchCalls))
+	}
+}
+
+func TestDefaultGitRunner_FetchMirror(t *testing.T) {
+	srcDir := t.TempDir()
+	runGit(t, srcDir, "init")
+	runGit(t, srcDir, "config", "user.email", "test@test.com")
+	runGit(t, srcDir, "config", "user.name", "test")
+	writeFile(t, srcDir+"/file.txt", "hello")
+	runGit(t, srcDir, "add", ".")
+	runGit(t, srcDir, "commit", "-m", "init")
+
+	runner := &defaultGitRunner{}
+	mirrorDir := t.TempDir() + "/mirror.git"
+	if err := runner.CloneMirror(context.Background(), srcDir, mirrorDir); err != nil {
+		t.Fatalf("CloneMirror failed: %v", err)
+	}
+
+	// Add a new commit to source
+	writeFile(t, srcDir+"/file2.txt", "world")
+	runGit(t, srcDir, "add", ".")
+	runGit(t, srcDir, "commit", "-m", "second")
+
+	if err := runner.FetchMirror(context.Background(), srcDir, mirrorDir); err != nil {
+		t.Fatalf("FetchMirror failed: %v", err)
+	}
+}
+
+func TestIsGitDir(t *testing.T) {
+	if isGitDir("/nonexistent") {
+		t.Error("expected false for nonexistent dir")
+	}
+
+	tmpDir := t.TempDir()
+	if isGitDir(tmpDir) {
+		t.Error("expected false for dir without HEAD")
+	}
+
+	os.WriteFile(tmpDir+"/HEAD", []byte("ref: refs/heads/main\n"), 0o644)
+	if !isGitDir(tmpDir) {
+		t.Error("expected true for dir with HEAD file")
 	}
 }
 

@@ -1,0 +1,21 @@
+# =============================================================================
+# PersistentVolumeClaim — Mirror Cache (Optional)
+# =============================================================================
+# Provides persistent storage for git mirror directories.
+# Without PVC, each pod restart requires a full clone.
+# With PVC, subsequent syncs use incremental fetch (much faster).
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: git-bridge-work
+  namespace: git-bridge
+  labels:
+    app: git-bridge
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # storageClassName: your-storage-class   # e.g. gp3, nfs-client, standard
+  resources:
+    requests:
+      storage: 10Gi

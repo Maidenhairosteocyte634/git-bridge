@@ -58,6 +58,8 @@ Supports CodeCommit, GitLab, GitHub with any-to-any mirroring via SQS polling an
 - **Dual event sources**: SQS polling (CodeCommit) + HTTP webhooks (GitLab/GitHub)
 - **DLQ support**: Failed SQS messages retry up to 5 times, then move to DLQ
 - **Notifications**: Slack webhook on success/failure (see [Slack App Setup](docs/slack-app-setup.md))
+- **Incremental sync**: Reuses existing mirror via `git fetch` — full clone only on first run or fallback
+- **Persistent cache**: PVC-backed mirror directory survives pod restarts for fast recovery
 - **Cloud-native**: K8s Deployment with liveness/readiness probes
 
 <br/>
@@ -66,7 +68,7 @@ Supports CodeCommit, GitLab, GitHub with any-to-any mirroring via SQS polling an
 
 - **Language**: Go 1.24+
 - **AWS SDK**: aws-sdk-go-v2 (SQS consumer)
-- **Git**: `git clone --mirror` / `git push --mirror --force`
+- **Git**: Incremental `git fetch --prune` (with `git clone --mirror` fallback) / `git push --force`
 - **Config**: YAML with `${ENV_VAR}` expansion (credentials only; repos defined directly)
 - **CI/CD**: GitHub Actions (test, release, changelog)
 - **Runtime**: Kubernetes (Alpine-based Docker image)
@@ -83,7 +85,7 @@ git-bridge/
 │   ├── consumer/
 │   │   ├── sqs.go          # SQS consumer (CodeCommit events via EventBridge)
 │   │   └── webhook.go      # HTTP webhook consumer (GitLab/GitHub push events)
-│   ├── mirror/             # Git mirror operations (clone/push, direction-aware)
+│   ├── mirror/             # Git mirror operations (incremental fetch/clone, push, direction-aware)
 │   ├── provider/           # Git provider abstraction (CodeCommit, GitLab, GitHub)
 │   ├── notify/             # Slack webhook notifications
 │   └── server/             # HTTP server (health + webhook endpoints)
@@ -91,6 +93,7 @@ git-bridge/
 │   ├── namespace.yaml
 │   ├── secret.yaml         # Credentials only (tokens, keys, passwords)
 │   ├── configmap.yaml      # config.yaml (repos defined directly, credentials via ${ENV_VAR})
+│   ├── pvc.yaml            # PersistentVolumeClaim for mirror cache (optional)
 │   └── deployment.yaml     # Deployment + Service + Ingress
 ├── examples/               # Example files with detailed comments
 │   ├── config.yaml         # App config example
@@ -215,7 +218,8 @@ kubectl apply -f k8s/namespace.yaml
 # 2. Create secrets (edit secret.yaml values first!)
 kubectl apply -f k8s/secret.yaml
 
-# 3. Create configmap and deployment
+# 3. Create PVC (optional), configmap and deployment
+kubectl apply -f k8s/pvc.yaml          # optional: for persistent mirror cache
 kubectl apply -f k8s/configmap.yaml
 kubectl apply -f k8s/deployment.yaml
 

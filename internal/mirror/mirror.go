@@ -21,6 +21,7 @@ const defaultWorkDir = "/tmp/git-bridge"
 // GitRunner executes git clone/push operations.
 type GitRunner interface {
 	CloneMirror(ctx context.Context, url, dir string) error
+	FetchMirror(ctx context.Context, url, dir string) error
 	// PushMirror pushes branches and tags. Returns (true, nil) if changes were pushed,
 	// (false, nil) if already up-to-date, or (false, err) on failure.
 	PushMirror(ctx context.Context, dir, url string) (changed bool, err error)
@@ -49,6 +50,14 @@ func (d *defaultGitRunner) CloneMirror(ctx context.Context, url, dir string) err
 	cmd := exec.CommandContext(ctx, "git", "clone", "--mirror", url, dir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%w: %s", err, string(out))
+	}
+	return nil
+}
+
+func (d *defaultGitRunner) FetchMirror(ctx context.Context, url, dir string) error {
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "fetch", "--prune", url, "+refs/*:refs/*")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("fetch mirror: %w: %s", err, string(out))
 	}
 	return nil
 }
@@ -106,6 +115,12 @@ func (d *defaultGitRunner) DeleteRef(ctx context.Context, workDir, url, refType,
 		return fmt.Errorf("push delete ref: %w: %s", err, string(out))
 	}
 	return nil
+}
+
+// isGitDir returns true if dir exists and looks like a bare git repository.
+func isGitDir(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, "HEAD"))
+	return err == nil && !info.IsDir()
 }
 
 // New creates a mirror service. Returns an error if any configured provider fails to initialize.
@@ -283,19 +298,33 @@ func (s *Service) doMirror(ctx context.Context, repoCfg config.RepoConfig, fromP
 	)
 
 	mirrorDir := filepath.Join(s.workDir, repoCfg.Name+"-"+src.Type()+".git")
-	defer os.RemoveAll(mirrorDir)
 
 	route := fmt.Sprintf("%s/%s → %s/%s", src.Type(), fromPath, tgt.Type(), toPath)
 
-	// Clone from source
-	logger.Info("cloning from source")
-	if err := s.git.CloneMirror(ctx, srcURL, mirrorDir); err != nil {
-		s.notifier.Send(notify.Message{
-			Level: "error",
-			Title: fmt.Sprintf("Mirror Sync Failed: %s", repoCfg.Name),
-			Body:  fmt.Sprintf("Action: clone\nRoute: %s\nError: %v", route, err),
-		})
-		return fmt.Errorf("clone: %w", err)
+	// Incremental fetch if mirror exists, otherwise full clone
+	if isGitDir(mirrorDir) {
+		logger.Info("fetching from source (incremental)")
+		if err := s.git.FetchMirror(ctx, srcURL, mirrorDir); err != nil {
+			logger.Warn("incremental fetch failed, falling back to full clone", "error", err)
+			if err := s.git.CloneMirror(ctx, srcURL, mirrorDir); err != nil {
+				s.notifier.Send(notify.Message{
+					Level: "error",
+					Title: fmt.Sprintf("Mirror Sync Failed: %s", repoCfg.Name),
+					Body:  fmt.Sprintf("Action: clone (fallback)\nRoute: %s\nError: %v", route, err),
+				})
+				return fmt.Errorf("clone: %w", err)
+			}
+		}
+	} else {
+		logger.Info("cloning from source (initial)")
+		if err := s.git.CloneMirror(ctx, srcURL, mirrorDir); err != nil {
+			s.notifier.Send(notify.Message{
+				Level: "error",
+				Title: fmt.Sprintf("Mirror Sync Failed: %s", repoCfg.Name),
+				Body:  fmt.Sprintf("Action: clone\nRoute: %s\nError: %v", route, err),
+			})
+			return fmt.Errorf("clone: %w", err)
+		}
 	}
 
 	// Push to target
