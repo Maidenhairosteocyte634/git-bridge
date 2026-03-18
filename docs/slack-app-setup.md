@@ -111,3 +111,18 @@ Git-Bridge sends notifications in the following cases:
 | Ref delete failure | `error` | Failed to delete ref |
 
 > No notification is sent when the push is already up-to-date (loop detection).
+
+<br/>
+
+### Example: Mirror Sync Success
+
+```
+✅ Mirror Sync: my-repo
+Action: branches + tags synced
+Route: codecommit/my-repo → gitlab/team/my-repo
+Duration: 1.234s
+Target: https://gitlab.example.com/team/my-repo
+Pushed by: somaz <somaz@example.com>
+```
+
+> **Pushed by** shows the author of the latest commit in the synced repository. This is extracted from `git log` after mirroring, so it works regardless of the event source (SQS, GitLab webhook, GitHub webhook).

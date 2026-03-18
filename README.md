@@ -57,7 +57,7 @@ Supports CodeCommit, GitLab, GitHub with any-to-any mirroring via SQS polling an
 - **Multi-SQS consumer**: Support multiple SQS queues for multi-AWS region/account environments
 - **Dual event sources**: SQS polling (CodeCommit) + HTTP webhooks (GitLab/GitHub)
 - **DLQ support**: Failed SQS messages retry up to 5 times, then move to DLQ
-- **Notifications**: Slack webhook on success/failure (see [Slack App Setup](docs/slack-app-setup.md))
+- **Notifications**: Slack webhook on success/failure with committer info (see [Slack App Setup](docs/slack-app-setup.md))
 - **Incremental sync**: Reuses existing mirror via `git fetch` — full clone only on first run or fallback
 - **Persistent cache**: PVC-backed mirror directory survives pod restarts for fast recovery
 - **Cloud-native**: K8s Deployment with liveness/readiness probes

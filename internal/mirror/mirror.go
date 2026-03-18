@@ -26,6 +26,8 @@ type GitRunner interface {
 	// (false, nil) if already up-to-date, or (false, err) on failure.
 	PushMirror(ctx context.Context, dir, url string) (changed bool, err error)
 	DeleteRef(ctx context.Context, workDir, url, refType, refName string) error
+	// LastCommitInfo returns the author of the latest commit (e.g. "name <email>").
+	LastCommitInfo(ctx context.Context, dir string) (string, error)
 }
 
 // Service handles git mirror operations.
@@ -115,6 +117,15 @@ func (d *defaultGitRunner) DeleteRef(ctx context.Context, workDir, url, refType,
 		return fmt.Errorf("push delete ref: %w: %s", err, string(out))
 	}
 	return nil
+}
+
+func (d *defaultGitRunner) LastCommitInfo(ctx context.Context, dir string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "log", "-1", "--format=%an <%ae>")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git log: %w: %s", err, string(out))
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // isGitDir returns true if dir exists and looks like a bare git repository.
@@ -348,13 +359,24 @@ func (s *Service) doMirror(ctx context.Context, repoCfg config.RepoConfig, fromP
 
 	logger.Info("mirror sync done", "duration", elapsed.String())
 
+	// Extract last commit author for notification
+	author := ""
+	if info, err := s.git.LastCommitInfo(ctx, mirrorDir); err == nil && info != "" {
+		author = info
+	}
+
+	body := fmt.Sprintf("Action: branches + tags synced\nRoute: %s\nDuration: %s\nTarget: %s",
+		route,
+		elapsed.Round(time.Millisecond),
+		tgt.WebURL(toPath))
+	if author != "" {
+		body += fmt.Sprintf("\nPushed by: %s", author)
+	}
+
 	s.notifier.Send(notify.Message{
 		Level: "success",
 		Title: fmt.Sprintf("Mirror Sync: %s", repoCfg.Name),
-		Body: fmt.Sprintf("Action: branches + tags synced\nRoute: %s\nDuration: %s\nTarget: %s",
-			route,
-			elapsed.Round(time.Millisecond),
-			tgt.WebURL(toPath)),
+		Body:  body,
 	})
 
 	return nil
