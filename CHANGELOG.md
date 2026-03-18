@@ -2,25 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased (2026-03-16)
+## [v0.2.0](https://github.com/somaz94/git-bridge/compare/v0.1.0...v0.2.0) (2026-03-18)
+
+### Features
+
+- add committer info (Pushed by) to Slack mirror sync notifications ([36acacd](https://github.com/somaz94/git-bridge/commit/36acacdf72dc83e6b60acb147a05856fbefc9b96))
+- implement incremental fetch with PVC-backed mirror cache ([5c402e5](https://github.com/somaz94/git-bridge/commit/5c402e59ac39cc4ee8f380b6b798fd9df25c32b8))
 
 ### Documentation
 
+- CLAUDE.md ([0acbff3](https://github.com/somaz94/git-bridge/commit/0acbff35a74d5ac485572df8a9e21a44102b5bb9))
+- add CLAUDE.md project guide ([1afd0ef](https://github.com/somaz94/git-bridge/commit/1afd0ef3f3a10db20cbb55fa406103530eb8748c))
+- update changelog ([daec38c](https://github.com/somaz94/git-bridge/commit/daec38c13e94db0b2bbafcde3495976a9cc76f58))
 - README.md ([2064c8a](https://github.com/somaz94/git-bridge/commit/2064c8ad404f2b3029a07652eecb44cdc6ca7aa9))
 - update CONTRIBUTORS.md ([20383cd](https://github.com/somaz94/git-bridge/commit/20383cdb74a7989122dedca2247652fe0b320f32))
 - update changelog ([0104baa](https://github.com/somaz94/git-bridge/commit/0104baa44fdac57ec6136504264e516dcae853ac))
 
+### Tests
+
+- improve coverage from 93% to 97.9% and separate make test/test-cover roles ([0f65504](https://github.com/somaz94/git-bridge/commit/0f65504f047a4132e9312095aa64fd49b788ed5c))
+
 ### Continuous Integration
 
+- use somaz94/contributors-action@v1 for contributors generation ([49fd3a5](https://github.com/somaz94/git-bridge/commit/49fd3a56852728eb8b5eb35ea6954d156e916803))
+- use major-tag-action for version tag updates ([11b9d93](https://github.com/somaz94/git-bridge/commit/11b9d9356498ab84e53301ce1ddccb0ea81504cf))
 - migrate changelog generator to go-changelog-action ([6510563](https://github.com/somaz94/git-bridge/commit/65105638df73f3ea8139b396c40470e07fc8efe3))
 - add GitHub release notes configuration ([4fbc5d9](https://github.com/somaz94/git-bridge/commit/4fbc5d95d0693f94680bf77e4a39b5485f9c5eff))
 - unify changelog-generator with flexible tag pattern ([a8778f6](https://github.com/somaz94/git-bridge/commit/a8778f6ceed28908975c22cea9fb8b285ccd5574))
 
 ### Contributors
 
-- GitHub Action
-- GitHub Actions
 - somaz
+
+<br/>
 
 ## [v0.1.0](https://github.com/somaz94/git-bridge/compare/v0.0.1...v0.1.0) (2026-03-13)
 
@@ -52,13 +66,15 @@ All notable changes to this project will be documented in this file.
 
 ### Contributors
 
-- GitHub Action
-- dependabot[bot]
 - somaz
 
-## v0.0.1 (2026-03-13)
+<br/>
+
+## [v0.0.1](https://github.com/somaz94/git-bridge/releases/tag/v0.0.1) (2026-03-13)
 
 ### Contributors
 
 - somaz
+
+<br/>
 
