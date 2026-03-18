@@ -40,7 +40,7 @@ make deploy         # Deploy to Kubernetes
 ## Deployment
 
 ```bash
-kubectl apply -f k8s/{namespace,secret,configmap,deployment}.yaml
+kubectl apply -f k8s
 ```
 
 ## Language
