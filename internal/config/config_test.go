@@ -521,6 +521,83 @@ consumers:
 	}
 }
 
+func TestLoad_ConsumerEmptyQueueURL(t *testing.T) {
+	content := `
+providers:
+  cc:
+    type: codecommit
+    region: us-east-1
+    credentials:
+      git_username: u
+      git_password: p
+  gl:
+    type: gitlab
+    base_url: http://gl.test
+    credentials:
+      token: tok
+repos:
+  - name: r
+    source: cc
+    target: gl
+    source_path: r
+    target_path: r
+    direction: source-to-target
+consumers:
+  - name: bad
+    queue_url: ""
+    region: us-east-1
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for empty consumer queue_url")
+	}
+}
+
+func TestLoad_ConsumerAutoName(t *testing.T) {
+	content := `
+providers:
+  cc:
+    type: codecommit
+    region: us-east-1
+    credentials:
+      git_username: u
+      git_password: p
+  gl:
+    type: gitlab
+    base_url: http://gl.test
+    credentials:
+      token: tok
+repos:
+  - name: r
+    source: cc
+    target: gl
+    source_path: r
+    target_path: r
+    direction: source-to-target
+consumers:
+  - queue_url: https://sqs.us-east-1.amazonaws.com/111/q1
+    region: us-east-1
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Consumers[0].Name != "sqs-0" {
+		t.Errorf("consumer name = %q, want sqs-0", cfg.Consumers[0].Name)
+	}
+	if cfg.Consumers[0].Type != "sqs" {
+		t.Errorf("consumer type = %q, want sqs", cfg.Consumers[0].Type)
+	}
+}
+
 func TestLoad_LegacyConsumerBackwardCompat(t *testing.T) {
 	content := `
 providers:

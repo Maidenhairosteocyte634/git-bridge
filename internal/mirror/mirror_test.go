@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 
@@ -24,6 +25,8 @@ type mockGitRunner struct {
 	pushErr        error
 	pushChanged    bool // when true, PushMirror reports changes were pushed
 	deleteRefErr   error
+	lastCommitInfo string
+	lastCommitErr  error
 }
 
 type cloneCall struct {
@@ -65,6 +68,10 @@ func (m *mockGitRunner) PushMirror(_ context.Context, dir, url string) (bool, er
 func (m *mockGitRunner) DeleteRef(_ context.Context, _, url, refType, refName string) error {
 	m.deleteRefCalls = append(m.deleteRefCalls, deleteRefCall{URL: url, RefType: refType, RefName: refName})
 	return m.deleteRefErr
+}
+
+func (m *mockGitRunner) LastCommitInfo(_ context.Context, _ string) (string, error) {
+	return m.lastCommitInfo, m.lastCommitErr
 }
 
 // mockNotifier records sent notifications.
@@ -337,7 +344,7 @@ func TestDoMirror_ProviderNotFound(t *testing.T) {
 }
 
 func TestDoMirror_SuccessNotification(t *testing.T) {
-	git := &mockGitRunner{pushChanged: true}
+	git := &mockGitRunner{pushChanged: true, lastCommitInfo: "somaz <somaz@example.com>"}
 	notif := &mockNotifier{}
 	svc := newTestService(nil, makeProviders(), notif, git)
 
@@ -355,6 +362,9 @@ func TestDoMirror_SuccessNotification(t *testing.T) {
 	}
 	if notif.messages[0].Title != "Mirror Sync: test-repo" {
 		t.Errorf("unexpected title: %q", notif.messages[0].Title)
+	}
+	if !strings.Contains(notif.messages[0].Body, "Pushed by: somaz <somaz@example.com>") {
+		t.Errorf("expected notification body to contain pusher info, got %q", notif.messages[0].Body)
 	}
 }
 
@@ -943,6 +953,28 @@ func TestDoMirror_IncrementalFetch(t *testing.T) {
 	}
 }
 
+func TestDoMirror_FetchAndFallbackCloneBothFail(t *testing.T) {
+	git := &mockGitRunner{fetchErr: fmt.Errorf("fetch failed"), cloneErr: fmt.Errorf("clone failed")}
+	notif := &mockNotifier{}
+	svc := newTestService(nil, makeProviders(), notif, git)
+	svc.workDir = t.TempDir()
+
+	// Create a fake bare git dir to trigger fetch path
+	mirrorDir := svc.workDir + "/test-repo-codecommit.git"
+	os.MkdirAll(mirrorDir, 0o755)
+	os.WriteFile(mirrorDir+"/HEAD", []byte("ref: refs/heads/main\n"), 0o644)
+
+	repoCfg := config.RepoConfig{Name: "test-repo"}
+	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo")
+	if err == nil {
+		t.Fatal("expected error when both fetch and fallback clone fail")
+	}
+
+	if len(notif.messages) != 1 || notif.messages[0].Level != "error" {
+		t.Errorf("expected error notification, got %+v", notif.messages)
+	}
+}
+
 func TestDoMirror_FetchFallbackToClone(t *testing.T) {
 	git := &mockGitRunner{fetchErr: fmt.Errorf("fetch failed"), pushChanged: true}
 	notif := &mockNotifier{}
@@ -1026,6 +1058,146 @@ func TestIsGitDir(t *testing.T) {
 	os.WriteFile(tmpDir+"/HEAD", []byte("ref: refs/heads/main\n"), 0o644)
 	if !isGitDir(tmpDir) {
 		t.Error("expected true for dir with HEAD file")
+	}
+}
+
+// --- LastCommitInfo tests ---
+
+func TestDefaultGitRunner_FetchMirror_InvalidURL(t *testing.T) {
+	srcDir := t.TempDir()
+	runGit(t, srcDir, "init")
+	runGit(t, srcDir, "config", "user.email", "test@test.com")
+	runGit(t, srcDir, "config", "user.name", "test")
+	writeFile(t, srcDir+"/file.txt", "hello")
+	runGit(t, srcDir, "add", ".")
+	runGit(t, srcDir, "commit", "-m", "init")
+
+	runner := &defaultGitRunner{}
+	mirrorDir := t.TempDir() + "/mirror.git"
+	if err := runner.CloneMirror(context.Background(), srcDir, mirrorDir); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	err := runner.FetchMirror(context.Background(), "http://invalid.invalid.invalid/repo.git", mirrorDir)
+	if err == nil {
+		t.Fatal("expected error for invalid fetch URL")
+	}
+}
+
+func TestDefaultGitRunner_DeleteRef_MkdirFail(t *testing.T) {
+	runner := &defaultGitRunner{}
+	tmpFile := t.TempDir() + "/file"
+	writeFile(t, tmpFile, "not a dir")
+
+	err := runner.DeleteRef(context.Background(), tmpFile+"/sub", "http://example.com/repo.git", "branch", "main")
+	if err == nil {
+		t.Fatal("expected error when workdir creation fails")
+	}
+}
+
+func TestDefaultGitRunner_PushMirror_TagsError(t *testing.T) {
+	srcDir := t.TempDir()
+	runGit(t, srcDir, "init")
+	runGit(t, srcDir, "config", "user.email", "test@test.com")
+	runGit(t, srcDir, "config", "user.name", "test")
+	writeFile(t, srcDir+"/file.txt", "hello")
+	runGit(t, srcDir, "add", ".")
+	runGit(t, srcDir, "commit", "-m", "init")
+	runGit(t, srcDir, "tag", "v1.0.0")
+
+	runner := &defaultGitRunner{}
+	mirrorDir := t.TempDir() + "/mirror.git"
+	if err := runner.CloneMirror(context.Background(), srcDir, mirrorDir); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tgtDir := t.TempDir()
+	runGit(t, tgtDir, "init", "--bare")
+	changed, err := runner.PushMirror(ctx, mirrorDir, tgtDir)
+	if err != nil {
+		t.Fatalf("PushMirror failed: %v", err)
+	}
+	if !changed {
+		t.Error("expected changed=true")
+	}
+}
+
+func TestDefaultGitRunner_CloneMirror_CleanupExistingDir(t *testing.T) {
+	srcDir := t.TempDir()
+	runGit(t, srcDir, "init", "--bare")
+
+	runner := &defaultGitRunner{}
+	destDir := t.TempDir() + "/mirror.git"
+	os.MkdirAll(destDir, 0o755)
+	writeFile(t, destDir+"/stale-file", "old data")
+
+	err := runner.CloneMirror(context.Background(), srcDir, destDir)
+	if err != nil {
+		t.Fatalf("CloneMirror failed: %v", err)
+	}
+
+	if _, err := os.Stat(destDir + "/stale-file"); err == nil {
+		t.Error("expected stale file to be removed")
+	}
+}
+
+func TestDefaultGitRunner_LastCommitInfo(t *testing.T) {
+	srcDir := t.TempDir()
+	runGit(t, srcDir, "init")
+	runGit(t, srcDir, "config", "user.email", "somaz@example.com")
+	runGit(t, srcDir, "config", "user.name", "somaz")
+	writeFile(t, srcDir+"/file.txt", "hello")
+	runGit(t, srcDir, "add", ".")
+	runGit(t, srcDir, "commit", "-m", "init")
+
+	runner := &defaultGitRunner{}
+	info, err := runner.LastCommitInfo(context.Background(), srcDir)
+	if err != nil {
+		t.Fatalf("LastCommitInfo failed: %v", err)
+	}
+	if info != "somaz <somaz@example.com>" {
+		t.Errorf("unexpected info: %q", info)
+	}
+}
+
+func TestDefaultGitRunner_LastCommitInfo_InvalidDir(t *testing.T) {
+	runner := &defaultGitRunner{}
+	_, err := runner.LastCommitInfo(context.Background(), "/nonexistent/dir")
+	if err == nil {
+		t.Fatal("expected error for invalid dir")
+	}
+}
+
+func TestDefaultGitRunner_LastCommitInfo_EmptyRepo(t *testing.T) {
+	srcDir := t.TempDir()
+	runGit(t, srcDir, "init")
+
+	runner := &defaultGitRunner{}
+	_, err := runner.LastCommitInfo(context.Background(), srcDir)
+	if err == nil {
+		t.Fatal("expected error for empty repo with no commits")
+	}
+}
+
+func TestDoMirror_SuccessNotification_NoAuthor(t *testing.T) {
+	git := &mockGitRunner{pushChanged: true, lastCommitErr: fmt.Errorf("no commits")}
+	notif := &mockNotifier{}
+	svc := newTestService(nil, makeProviders(), notif, git)
+
+	repoCfg := config.RepoConfig{Name: "test-repo"}
+	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(notif.messages) != 1 {
+		t.Fatalf("expected 1 notification, got %d", len(notif.messages))
+	}
+	if strings.Contains(notif.messages[0].Body, "Pushed by:") {
+		t.Errorf("should not contain Pushed by when author unavailable, got %q", notif.messages[0].Body)
 	}
 }
 

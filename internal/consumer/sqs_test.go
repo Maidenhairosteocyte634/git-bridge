@@ -416,6 +416,42 @@ func TestHandleMessage_DeleteFailure_NoMessageDelete(t *testing.T) {
 	}
 }
 
+func TestNewSQS_DefaultName(t *testing.T) {
+	cfg := config.ConsumerConfig{
+		Type:     "sqs",
+		QueueURL: "https://sqs.us-east-1.amazonaws.com/123456/test-queue",
+		Region:   "us-east-1",
+		Name:     "",
+	}
+
+	syncer := &mockSyncer{}
+	s, err := NewSQS(cfg, syncer)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if s.name != "default" {
+		t.Errorf("name = %q, want default", s.name)
+	}
+}
+
+func TestNewSQS_CustomName(t *testing.T) {
+	cfg := config.ConsumerConfig{
+		Type:     "sqs",
+		QueueURL: "https://sqs.us-east-1.amazonaws.com/123456/test-queue",
+		Region:   "us-east-1",
+		Name:     "my-consumer",
+	}
+
+	syncer := &mockSyncer{}
+	s, err := NewSQS(cfg, syncer)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if s.name != "my-consumer" {
+		t.Errorf("name = %q, want my-consumer", s.name)
+	}
+}
+
 func TestCodeCommitEvent_EmptyDetail(t *testing.T) {
 	raw := `{"detail":{}}`
 	var event CodeCommitEvent

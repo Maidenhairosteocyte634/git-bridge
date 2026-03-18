@@ -17,15 +17,10 @@ run: build
 
 ## Test
 test:
-	@go test -race -cover ./internal/... 2>&1 | grep -E "^(ok|FAIL|\?)" | while read line; do \
+	@go test -race ./internal/... 2>&1 | grep -E "^(ok|FAIL|\?)" | while read line; do \
 		pkg=$$(echo "$$line" | awk '{print $$2}'); \
 		status=$$(echo "$$line" | awk '{print $$1}'); \
-		if echo "$$line" | grep -q "coverage:"; then \
-			cov=$$(echo "$$line" | grep -o '[0-9]*\.[0-9]*%'); \
-			printf "  %-6s %-40s %s\n" "$$status" "$$pkg" "$$cov"; \
-		else \
-			printf "  %-6s %-40s %s\n" "$$status" "$$pkg" "[no test]"; \
-		fi; \
+		printf "  %-6s %s\n" "$$status" "$$pkg"; \
 	done
 
 test-cover:

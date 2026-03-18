@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -151,5 +152,30 @@ func TestRunServer_GracefulShutdown(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("server did not shut down in time")
+	}
+}
+
+func TestRunServer_PortInUse(t *testing.T) {
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("failed to bind: %v", err)
+	}
+	defer ln.Close()
+
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		RunServer(ctx, port, nil)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("server should have exited due to port conflict")
 	}
 }

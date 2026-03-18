@@ -343,6 +343,39 @@ func TestGitHubHandler_SyncByTargetError(t *testing.T) {
 	}
 }
 
+// errReader always returns an error on Read.
+type errReader struct{}
+
+func (e *errReader) Read(_ []byte) (int, error) {
+	return 0, fmt.Errorf("read error")
+}
+
+func TestGitLabHandler_ReadBodyError(t *testing.T) {
+	wh := NewWebhook(context.Background(), &mockMirrorer{}, "", "")
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/gitlab", &errReader{})
+	w := httptest.NewRecorder()
+
+	wh.GitLabHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestGitHubHandler_ReadBodyError(t *testing.T) {
+	wh := NewWebhook(context.Background(), &mockMirrorer{}, "", "")
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", &errReader{})
+	w := httptest.NewRecorder()
+
+	wh.GitHubHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
 func TestVerifyGitHubSignature(t *testing.T) {
 	secret := "test-secret"
 	payload := []byte(`{"ref":"refs/heads/main"}`)
