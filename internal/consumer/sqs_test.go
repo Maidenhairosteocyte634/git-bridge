@@ -12,6 +12,7 @@ import (
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
 	"git-bridge/internal/config"
+	"git-bridge/internal/mirror"
 )
 
 // mockSQSClient implements sqsClient for testing.
@@ -43,6 +44,7 @@ func (m *mockSQSClient) DeleteMessage(ctx context.Context, input *sqs.DeleteMess
 // mockSyncer records Sync and SyncDelete calls and returns configurable errors.
 type mockSyncer struct {
 	syncCalls       []string
+	syncMetas       []mirror.EventMeta
 	syncErr         error
 	deleteCalls     []deleteCall
 	syncDeleteErr   error
@@ -54,8 +56,9 @@ type deleteCall struct {
 	RefName  string
 }
 
-func (m *mockSyncer) Sync(_ context.Context, repoName string) error {
+func (m *mockSyncer) Sync(_ context.Context, repoName string, meta mirror.EventMeta) error {
 	m.syncCalls = append(m.syncCalls, repoName)
+	m.syncMetas = append(m.syncMetas, meta)
 	return m.syncErr
 }
 
@@ -460,5 +463,49 @@ func TestCodeCommitEvent_EmptyDetail(t *testing.T) {
 	}
 	if event.Detail.RepositoryName != "" {
 		t.Errorf("expected empty repo name, got %q", event.Detail.RepositoryName)
+	}
+}
+
+// --- EventMeta ref construction tests ---
+
+func TestHandleMessage_BranchEvent_PassesRefMeta(t *testing.T) {
+	msgBody := makeEventFull("my-repo", "main", "branch", "referenceCreated")
+	syncer := &mockSyncer{}
+	s := newTestSQSConsumer(&mockSQSClient{}, syncer)
+	s.handleMessage(context.Background(), makeSQSMessage("ref-1", msgBody))
+
+	if len(syncer.syncMetas) != 1 {
+		t.Fatalf("expected 1 sync meta, got %d", len(syncer.syncMetas))
+	}
+	if syncer.syncMetas[0].Ref != "refs/heads/main" {
+		t.Errorf("expected ref 'refs/heads/main', got %q", syncer.syncMetas[0].Ref)
+	}
+}
+
+func TestHandleMessage_TagEvent_PassesRefMeta(t *testing.T) {
+	msgBody := makeEventFull("my-repo", "v1.0.0", "tag", "referenceCreated")
+	syncer := &mockSyncer{}
+	s := newTestSQSConsumer(&mockSQSClient{}, syncer)
+	s.handleMessage(context.Background(), makeSQSMessage("ref-2", msgBody))
+
+	if len(syncer.syncMetas) != 1 {
+		t.Fatalf("expected 1 sync meta, got %d", len(syncer.syncMetas))
+	}
+	if syncer.syncMetas[0].Ref != "refs/tags/v1.0.0" {
+		t.Errorf("expected ref 'refs/tags/v1.0.0', got %q", syncer.syncMetas[0].Ref)
+	}
+}
+
+func TestHandleMessage_DeleteEvent_NoSyncMeta(t *testing.T) {
+	msgBody := makeDeleteEvent("my-repo", "old-branch", "branch")
+	syncer := &mockSyncer{}
+	s := newTestSQSConsumer(&mockSQSClient{}, syncer)
+	s.handleMessage(context.Background(), makeSQSMessage("ref-3", msgBody))
+
+	if len(syncer.syncMetas) != 0 {
+		t.Errorf("expected no sync meta for delete event, got %d", len(syncer.syncMetas))
+	}
+	if len(syncer.deleteCalls) != 1 {
+		t.Errorf("expected 1 delete call, got %d", len(syncer.deleteCalls))
 	}
 }

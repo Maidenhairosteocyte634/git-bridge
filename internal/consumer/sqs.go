@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
 	"git-bridge/internal/config"
+	"git-bridge/internal/mirror"
 )
 
 const (
@@ -40,7 +41,7 @@ type sqsClient interface {
 
 // Syncer performs mirror sync operations triggered by source-side events.
 type Syncer interface {
-	Sync(ctx context.Context, repoName string) error
+	Sync(ctx context.Context, repoName string, meta mirror.EventMeta) error
 	SyncDelete(ctx context.Context, repoName, refType, refName string) error
 }
 
@@ -139,11 +140,18 @@ func (s *SQS) handleMessage(ctx context.Context, msg types.Message) {
 	logger = logger.With("repo", repo, "ref", ref, "event", eventType)
 	logger.Info("received mirror event")
 
+	var fullRef string
+	if refType == "tag" {
+		fullRef = "refs/tags/" + ref
+	} else {
+		fullRef = "refs/heads/" + ref
+	}
+
 	var err error
 	if eventType == "referenceDeleted" {
 		err = s.mirrorSvc.SyncDelete(ctx, repo, refType, ref)
 	} else {
-		err = s.mirrorSvc.Sync(ctx, repo)
+		err = s.mirrorSvc.Sync(ctx, repo, mirror.EventMeta{Ref: fullRef})
 	}
 
 	if err != nil {

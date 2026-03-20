@@ -598,6 +598,66 @@ consumers:
 	}
 }
 
+func TestLoad_DuplicateRepoName(t *testing.T) {
+	content := `
+providers:
+  cc:
+    type: codecommit
+    region: us-east-1
+    credentials: {}
+  gl:
+    type: gitlab
+    base_url: http://gl.test
+    credentials: {}
+repos:
+  - name: same-repo
+    source: cc
+    target: gl
+    source_path: r1
+    target_path: r1
+    direction: source-to-target
+  - name: same-repo
+    source: cc
+    target: gl
+    source_path: r2
+    target_path: r2
+    direction: source-to-target
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for duplicate repo name")
+	}
+}
+
+func TestLoad_SameSourceTarget(t *testing.T) {
+	content := `
+providers:
+  cc:
+    type: codecommit
+    region: us-east-1
+    credentials: {}
+repos:
+  - name: r
+    source: cc
+    target: cc
+    source_path: r
+    target_path: r
+    direction: source-to-target
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte(content), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for same source and target provider")
+	}
+}
+
 func TestLoad_LegacyConsumerBackwardCompat(t *testing.T) {
 	content := `
 providers:

@@ -1,6 +1,7 @@
 package mirror
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -18,6 +19,27 @@ import (
 
 const defaultWorkDir = "/tmp/git-bridge"
 
+// EventMeta carries webhook/event metadata through the sync pipeline.
+type EventMeta struct {
+	Ref string // full ref (e.g. "refs/heads/main", "refs/tags/v1.0.0")
+}
+
+// RefName returns the short ref name (e.g. "main", "v1.0.0").
+func (m EventMeta) RefName() string {
+	if strings.HasPrefix(m.Ref, "refs/heads/") {
+		return strings.TrimPrefix(m.Ref, "refs/heads/")
+	}
+	if strings.HasPrefix(m.Ref, "refs/tags/") {
+		return strings.TrimPrefix(m.Ref, "refs/tags/")
+	}
+	return m.Ref
+}
+
+// IsTag returns true if the ref is a tag.
+func (m EventMeta) IsTag() bool {
+	return strings.HasPrefix(m.Ref, "refs/tags/")
+}
+
 // GitRunner executes git clone/push operations.
 type GitRunner interface {
 	CloneMirror(ctx context.Context, url, dir string) error
@@ -26,8 +48,8 @@ type GitRunner interface {
 	// (false, nil) if already up-to-date, or (false, err) on failure.
 	PushMirror(ctx context.Context, dir, url string) (changed bool, err error)
 	DeleteRef(ctx context.Context, workDir, url, refType, refName string) error
-	// LastCommitInfo returns the author of the latest commit (e.g. "name <email>").
-	LastCommitInfo(ctx context.Context, dir string) (string, error)
+	// CommitAuthor returns the author name of the latest commit on the given ref.
+	CommitAuthor(ctx context.Context, dir, ref string) (string, error)
 }
 
 // Service handles git mirror operations.
@@ -67,33 +89,59 @@ func (d *defaultGitRunner) FetchMirror(ctx context.Context, url, dir string) err
 func (d *defaultGitRunner) PushMirror(ctx context.Context, dir, url string) (bool, error) {
 	changed := false
 
-	// Push all branches
-	pushAll := exec.CommandContext(ctx, "git", "-C", dir, "push", "--force", "--all", url)
-	outAll, err := pushAll.CombinedOutput()
-	if err != nil {
-		return false, fmt.Errorf("push branches: %w: %s", err, string(outAll))
+	// Push all branches (--porcelain for reliable change detection)
+	// Use separate stdout/stderr to avoid stderr progress lines polluting porcelain parsing
+	pushAll := exec.CommandContext(ctx, "git", "-C", dir, "push", "--porcelain", "--force", "--all", url)
+	var stdoutAll, stderrAll bytes.Buffer
+	pushAll.Stdout = &stdoutAll
+	pushAll.Stderr = &stderrAll
+	if err := pushAll.Run(); err != nil {
+		return false, fmt.Errorf("push branches: %w: %s", err, stderrAll.String())
 	}
-	if !isUpToDate(string(outAll)) {
+	if hasPorcelainChanges(stdoutAll.String()) {
 		changed = true
 	}
 
-	// Push all tags
-	pushTags := exec.CommandContext(ctx, "git", "-C", dir, "push", "--force", "--tags", url)
-	outTags, err := pushTags.CombinedOutput()
-	if err != nil {
-		return false, fmt.Errorf("push tags: %w: %s", err, string(outTags))
+	// Push all tags (--porcelain for reliable change detection)
+	pushTags := exec.CommandContext(ctx, "git", "-C", dir, "push", "--porcelain", "--force", "--tags", url)
+	var stdoutTags, stderrTags bytes.Buffer
+	pushTags.Stdout = &stdoutTags
+	pushTags.Stderr = &stderrTags
+	if err := pushTags.Run(); err != nil {
+		return false, fmt.Errorf("push tags: %w: %s", err, stderrTags.String())
 	}
-	if !isUpToDate(string(outTags)) {
+	if hasPorcelainChanges(stdoutTags.String()) {
 		changed = true
 	}
 
 	return changed, nil
 }
 
-// isUpToDate returns true if git push output indicates no changes were pushed.
-func isUpToDate(output string) bool {
-	trimmed := strings.TrimSpace(output)
-	return trimmed == "" || strings.Contains(trimmed, "Everything up-to-date")
+// hasPorcelainChanges parses git push --porcelain output and returns true if any
+// ref was actually updated. Porcelain format: each ref line starts with a flag character.
+// '=' means up-to-date (no change), any other flag means a change was pushed.
+func hasPorcelainChanges(output string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "To ") || strings.HasPrefix(line, "Done") {
+			continue
+		}
+		// Porcelain ref lines: <flag>\t<from>:<to>\t<summary>
+		// flag: ' ' (success), '+' (forced), '-' (deleted), '*' (new), '=' (up-to-date), '!' (rejected)
+		if len(line) > 0 && line[0] != '=' {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *defaultGitRunner) CommitAuthor(ctx context.Context, dir, ref string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "log", "-1", "--format=%an", ref)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git log for ref %q: %w: %s", ref, err, string(out))
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func (d *defaultGitRunner) DeleteRef(ctx context.Context, workDir, url, refType, refName string) error {
@@ -119,14 +167,6 @@ func (d *defaultGitRunner) DeleteRef(ctx context.Context, workDir, url, refType,
 	return nil
 }
 
-func (d *defaultGitRunner) LastCommitInfo(ctx context.Context, dir string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "log", "-1", "--format=%an <%ae>")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("git log: %w: %s", err, string(out))
-	}
-	return strings.TrimSpace(string(out)), nil
-}
 
 // isGitDir returns true if dir exists and looks like a bare git repository.
 func isGitDir(dir string) bool {
@@ -175,13 +215,13 @@ func allowsTargetToSource(direction string) bool {
 
 // Sync mirrors a repository triggered by source-side event (e.g. CodeCommit → SQS).
 // repoName is the source_path of the repo.
-func (s *Service) Sync(ctx context.Context, repoName string) error {
+func (s *Service) Sync(ctx context.Context, repoName string, meta EventMeta) error {
 	for _, repoCfg := range s.configs {
 		if repoCfg.SourcePath != repoName {
 			continue
 		}
 		if allowsSourceToTarget(repoCfg.Direction) {
-			return s.doMirror(ctx, repoCfg, repoCfg.Source, repoCfg.SourcePath, repoCfg.Target, repoCfg.TargetPath)
+			return s.doMirror(ctx, repoCfg, repoCfg.Source, repoCfg.SourcePath, repoCfg.Target, repoCfg.TargetPath, meta)
 		}
 		return fmt.Errorf("repo %q direction %q does not allow source-to-target sync", repoName, repoCfg.Direction)
 	}
@@ -190,7 +230,7 @@ func (s *Service) Sync(ctx context.Context, repoName string) error {
 
 // SyncByTarget mirrors a repository triggered by target-side event (e.g. GitLab/GitHub webhook).
 // providerName is the provider type, repoPath is the target_path of the repo.
-func (s *Service) SyncByTarget(ctx context.Context, providerName, repoPath string) error {
+func (s *Service) SyncByTarget(ctx context.Context, providerName, repoPath string, meta EventMeta) error {
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.timeoutSeconds)*time.Second)
 	defer cancel()
 	for _, repoCfg := range s.configs {
@@ -201,7 +241,7 @@ func (s *Service) SyncByTarget(ctx context.Context, providerName, repoPath strin
 		}
 		if tgtProvider.Type() == providerName && repoCfg.TargetPath == repoPath {
 			if allowsTargetToSource(repoCfg.Direction) {
-				return s.doMirror(ctx, repoCfg, repoCfg.Target, repoCfg.TargetPath, repoCfg.Source, repoCfg.SourcePath)
+				return s.doMirror(ctx, repoCfg, repoCfg.Target, repoCfg.TargetPath, repoCfg.Source, repoCfg.SourcePath, meta)
 			}
 			return fmt.Errorf("repo %q direction %q does not allow target-to-source sync", repoCfg.Name, repoCfg.Direction)
 		}
@@ -213,7 +253,7 @@ func (s *Service) SyncByTarget(ctx context.Context, providerName, repoPath strin
 		}
 		if srcProvider.Type() == providerName && repoCfg.SourcePath == repoPath {
 			if allowsSourceToTarget(repoCfg.Direction) {
-				return s.doMirror(ctx, repoCfg, repoCfg.Source, repoCfg.SourcePath, repoCfg.Target, repoCfg.TargetPath)
+				return s.doMirror(ctx, repoCfg, repoCfg.Source, repoCfg.SourcePath, repoCfg.Target, repoCfg.TargetPath, meta)
 			}
 			return fmt.Errorf("repo %q direction %q does not allow source-to-target sync", repoCfg.Name, repoCfg.Direction)
 		}
@@ -262,7 +302,11 @@ func (s *Service) doDeleteRef(ctx context.Context, repoCfg config.RepoConfig, to
 	logger := slog.With("repo", repoCfg.Name, "target", tgt.Type()+"/"+toPath, "ref", refType+"/"+refName)
 
 	deleteDir := filepath.Join(s.workDir, repoCfg.Name+"-delete.git")
-	defer os.RemoveAll(deleteDir)
+	defer func() {
+		if err := os.RemoveAll(deleteDir); err != nil {
+			slog.Warn("failed to clean up directory", "path", deleteDir, "error", err)
+		}
+	}()
 
 	logger.Info("deleting ref from target")
 	if err := s.git.DeleteRef(ctx, deleteDir, tgtURL, refType, refName); err != nil {
@@ -284,7 +328,7 @@ func (s *Service) doDeleteRef(ctx context.Context, repoCfg config.RepoConfig, to
 }
 
 // doMirror performs the actual git clone --mirror + git push --mirror.
-func (s *Service) doMirror(ctx context.Context, repoCfg config.RepoConfig, fromProvider, fromPath, toProvider, toPath string) error {
+func (s *Service) doMirror(ctx context.Context, repoCfg config.RepoConfig, fromProvider, fromPath, toProvider, toPath string, meta EventMeta) error {
 	mu := s.repoLock(repoCfg.Name)
 	mu.Lock()
 	defer mu.Unlock()
@@ -359,18 +403,20 @@ func (s *Service) doMirror(ctx context.Context, repoCfg config.RepoConfig, fromP
 
 	logger.Info("mirror sync done", "duration", elapsed.String())
 
-	// Extract last commit author for notification
-	author := ""
-	if info, err := s.git.LastCommitInfo(ctx, mirrorDir); err == nil && info != "" {
-		author = info
-	}
-
 	body := fmt.Sprintf("Action: branches + tags synced\nRoute: %s\nDuration: %s\nTarget: %s",
 		route,
 		elapsed.Round(time.Millisecond),
 		tgt.WebURL(toPath))
-	if author != "" {
-		body += fmt.Sprintf("\nPushed by: %s", author)
+	if meta.Ref != "" {
+		if meta.IsTag() {
+			body += fmt.Sprintf("\nTag: %s", meta.RefName())
+		} else {
+			body += fmt.Sprintf("\nBranch: %s", meta.RefName())
+		}
+		// Get the actual commit author from the pushed ref
+		if author, err := s.git.CommitAuthor(ctx, mirrorDir, meta.Ref); err == nil && author != "" {
+			body += fmt.Sprintf("\nPushed by: %s", author)
+		}
 	}
 
 	s.notifier.Send(notify.Message{

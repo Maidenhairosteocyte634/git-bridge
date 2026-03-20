@@ -114,7 +114,7 @@ Git-Bridge sends notifications in the following cases:
 
 <br/>
 
-### Example: Mirror Sync Success
+### Example: Mirror Sync Success (Branch Push)
 
 ```
 ✅ Mirror Sync: my-repo
@@ -122,7 +122,22 @@ Action: branches + tags synced
 Route: codecommit/my-repo → gitlab/team/my-repo
 Duration: 1.234s
 Target: https://gitlab.example.com/team/my-repo
-Pushed by: somaz <somaz@example.com>
+Branch: main
+Pushed by: somaz
 ```
 
-> **Pushed by** shows the author of the latest commit in the synced repository. This is extracted from `git log` after mirroring, so it works regardless of the event source (SQS, GitLab webhook, GitHub webhook).
+### Example: Mirror Sync Success (Tag Push)
+
+```
+✅ Mirror Sync: my-repo
+Action: branches + tags synced
+Route: codecommit/my-repo → gitlab/team/my-repo
+Duration: 0.876s
+Target: https://gitlab.example.com/team/my-repo
+Tag: v1.0.0
+Pushed by: somaz
+```
+
+> **Pushed by** shows the commit author of the pushed ref, extracted via `git log -1 --format=%an <ref>` from the mirror directory after push. This works consistently across all providers (GitLab, GitHub, CodeCommit/SQS). If no ref info is available, this field is omitted.
+>
+> **Branch** or **Tag** is shown based on the pushed ref. For tag pushes, only the tag name is displayed (no branch). For SQS events, the ref is derived from the `referenceName` and `referenceType` fields.

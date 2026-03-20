@@ -66,7 +66,7 @@ Supports CodeCommit, GitLab, GitHub with any-to-any mirroring via SQS polling an
 
 ## Tech Stack
 
-- **Language**: Go 1.24+
+- **Language**: Go 1.26+
 - **AWS SDK**: aws-sdk-go-v2 (SQS consumer)
 - **Git**: Incremental `git fetch --prune` (with `git clone --mirror` fallback) / `git push --force`
 - **Config**: YAML with `${ENV_VAR}` expansion (credentials only; repos defined directly)

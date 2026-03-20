@@ -194,7 +194,7 @@ repos:
 
 ### How It Works
 
-The webhook handler receives a push event from GitHub and calls `SyncByTarget("github", "org/my-repo")`. Inside `SyncByTarget`, it matches by **source provider + source path** and performs source-to-target sync (GitHub → GitLab).
+The webhook handler receives a push event from GitHub and calls `SyncByTarget("github", "org/my-repo", meta)`. Inside `SyncByTarget`, it matches by **source provider + source path** and performs source-to-target sync (GitHub → GitLab).
 
 <br/>
 
@@ -229,7 +229,7 @@ repos:
 
 ### How It Works
 
-The webhook handler receives a push event from GitLab and calls `SyncByTarget("gitlab", "team/my-repo")`. It matches by **source provider + source path** and performs source-to-target sync (GitLab → GitHub).
+The webhook handler receives a push event from GitLab and calls `SyncByTarget("gitlab", "team/my-repo", meta)`. It matches by **source provider + source path** and performs source-to-target sync (GitLab → GitHub).
 
 <br/>
 
@@ -303,7 +303,7 @@ repos:
 
 ### How It Works
 
-The webhook handler receives a push event from GitHub and calls `SyncByTarget("github", "org/my-repo")`. It matches by **target provider + target path** and performs target-to-source sync (GitHub → CodeCommit).
+The webhook handler receives a push event from GitHub and calls `SyncByTarget("github", "org/my-repo", meta)`. It matches by **target provider + target path** and performs target-to-source sync (GitHub → CodeCommit).
 
 <br/>
 
@@ -364,8 +364,8 @@ This means any webhook event is automatically routed to the correct sync directi
 
 | Event | Webhook Call | Match | Sync Direction |
 |-------|-------------|-------|---------------|
-| Push to GitHub `org/web-app` | `SyncByTarget("github", "org/web-app")` | Source match | GitHub → GitLab |
-| Push to GitLab `team/web-app` | `SyncByTarget("gitlab", "team/web-app")` | Target match | GitLab → GitHub |
+| Push to GitHub `org/web-app` | `SyncByTarget("github", "org/web-app", meta)` | Source match | GitHub → GitLab |
+| Push to GitLab `team/web-app` | `SyncByTarget("gitlab", "team/web-app", meta)` | Target match | GitLab → GitHub |
 
 <br/>
 

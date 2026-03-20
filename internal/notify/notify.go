@@ -65,7 +65,7 @@ func (s *Slack) Send(msg Message) {
 		slog.Error("slack notification failed", "error", err)
 		return
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		slog.Error("slack notification failed", "status", resp.StatusCode)

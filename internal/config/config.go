@@ -106,10 +106,15 @@ func validate(cfg *Config) error {
 	if len(cfg.Repos) == 0 {
 		return fmt.Errorf("no repos configured")
 	}
+	repoNames := make(map[string]bool)
 	for i, r := range cfg.Repos {
 		if r.Name == "" {
 			return fmt.Errorf("repo[%d]: name required", i)
 		}
+		if repoNames[r.Name] {
+			return fmt.Errorf("repo[%d]: duplicate repo name %q", i, r.Name)
+		}
+		repoNames[r.Name] = true
 		if r.Source == "" || r.Target == "" {
 			return fmt.Errorf("repo[%d] %s: source and target required", i, r.Name)
 		}
@@ -118,6 +123,9 @@ func validate(cfg *Config) error {
 		}
 		if _, ok := cfg.Providers[r.Target]; !ok {
 			return fmt.Errorf("repo[%d] %s: unknown target provider %q", i, r.Name, r.Target)
+		}
+		if r.Source == r.Target {
+			return fmt.Errorf("repo[%d] %s: source and target cannot be the same provider", i, r.Name)
 		}
 		dir := strings.ToLower(r.Direction)
 		if dir != "source-to-target" && dir != "target-to-source" && dir != "bidirectional" {

@@ -12,12 +12,14 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"git-bridge/internal/mirror"
 )
 
 // mockMirrorer is a no-op mock for testing webhook handlers.
 type mockMirrorer struct{}
 
-func (m *mockMirrorer) SyncByTarget(_ context.Context, providerName, repoPath string) error {
+func (m *mockMirrorer) SyncByTarget(_ context.Context, providerName, repoPath string, _ mirror.EventMeta) error {
 	return nil
 }
 
@@ -244,16 +246,26 @@ func TestGitLabHandler_NoSecretSkipsVerification(t *testing.T) {
 
 type trackingMirrorer struct {
 	called chan string
+	meta   chan mirror.EventMeta
 	err    error
 }
 
-func (m *trackingMirrorer) SyncByTarget(_ context.Context, providerName, repoPath string) error {
+func newTrackingMirrorer(err error) *trackingMirrorer {
+	return &trackingMirrorer{
+		called: make(chan string, 1),
+		meta:   make(chan mirror.EventMeta, 1),
+		err:    err,
+	}
+}
+
+func (m *trackingMirrorer) SyncByTarget(_ context.Context, providerName, repoPath string, meta mirror.EventMeta) error {
 	m.called <- providerName + "/" + repoPath
+	m.meta <- meta
 	return m.err
 }
 
 func TestGitLabHandler_SyncByTargetCalled(t *testing.T) {
-	mock := &trackingMirrorer{called: make(chan string, 1)}
+	mock := newTrackingMirrorer(nil)
 	wh := NewWebhook(context.Background(), mock, "", "")
 
 	payload := GitLabPushEvent{Ref: "refs/heads/main"}
@@ -275,7 +287,7 @@ func TestGitLabHandler_SyncByTargetCalled(t *testing.T) {
 }
 
 func TestGitHubHandler_SyncByTargetCalled(t *testing.T) {
-	mock := &trackingMirrorer{called: make(chan string, 1)}
+	mock := newTrackingMirrorer(nil)
 	wh := NewWebhook(context.Background(), mock, "", "")
 
 	payload := GitHubPushEvent{Ref: "refs/heads/main"}
@@ -297,7 +309,7 @@ func TestGitHubHandler_SyncByTargetCalled(t *testing.T) {
 }
 
 func TestGitLabHandler_SyncByTargetError(t *testing.T) {
-	mock := &trackingMirrorer{called: make(chan string, 1), err: fmt.Errorf("sync failed")}
+	mock := newTrackingMirrorer(fmt.Errorf("sync failed"))
 	wh := NewWebhook(context.Background(), mock, "", "")
 
 	payload := GitLabPushEvent{Ref: "refs/heads/main"}
@@ -321,7 +333,7 @@ func TestGitLabHandler_SyncByTargetError(t *testing.T) {
 }
 
 func TestGitHubHandler_SyncByTargetError(t *testing.T) {
-	mock := &trackingMirrorer{called: make(chan string, 1), err: fmt.Errorf("sync failed")}
+	mock := newTrackingMirrorer(fmt.Errorf("sync failed"))
 	wh := NewWebhook(context.Background(), mock, "", "")
 
 	payload := GitHubPushEvent{Ref: "refs/heads/main"}
@@ -395,5 +407,56 @@ func TestVerifyGitHubSignature(t *testing.T) {
 
 	if verifyGitHubSignature(payload, "wrong-secret", validSig) {
 		t.Error("wrong secret should fail verification")
+	}
+}
+
+// --- EventMeta propagation tests ---
+
+func TestGitLabHandler_PassesRefMeta(t *testing.T) {
+	mock := newTrackingMirrorer(nil)
+	wh := NewWebhook(context.Background(), mock, "", "")
+
+	payload := GitLabPushEvent{
+		EventName: "push",
+		UserName:  "somaz",
+		Ref:       "refs/heads/feature/login",
+	}
+	payload.Project.PathWithNamespace = "team/test-repo"
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/gitlab", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	wh.GitLabHandler(w, req)
+
+	select {
+	case meta := <-mock.meta:
+		if meta.Ref != "refs/heads/feature/login" {
+			t.Errorf("expected ref 'refs/heads/feature/login', got %q", meta.Ref)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SyncByTarget was not called")
+	}
+}
+
+func TestGitHubHandler_PassesRefMeta(t *testing.T) {
+	mock := newTrackingMirrorer(nil)
+	wh := NewWebhook(context.Background(), mock, "", "")
+
+	payload := GitHubPushEvent{Ref: "refs/tags/v1.0.0"}
+	payload.Pusher.Name = "somaz"
+	payload.Repository.FullName = "org/test-repo"
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	wh.GitHubHandler(w, req)
+
+	select {
+	case meta := <-mock.meta:
+		if meta.Ref != "refs/tags/v1.0.0" {
+			t.Errorf("expected ref 'refs/tags/v1.0.0', got %q", meta.Ref)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SyncByTarget was not called")
 	}
 }

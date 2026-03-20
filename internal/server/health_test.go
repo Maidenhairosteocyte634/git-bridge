@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"git-bridge/internal/mirror"
 	"time"
 
 	"git-bridge/internal/consumer"
@@ -101,7 +103,7 @@ func TestNewMux_UnknownPathReturns404(t *testing.T) {
 // mockMirrorer for webhook testing within server package
 type mockMirrorer struct{}
 
-func (m *mockMirrorer) SyncByTarget(_ context.Context, providerName, repoPath string) error {
+func (m *mockMirrorer) SyncByTarget(_ context.Context, providerName, repoPath string, meta mirror.EventMeta) error {
 	return nil
 }
 

@@ -10,6 +10,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+
+	"git-bridge/internal/mirror"
 )
 
 // maxBodySize is the maximum allowed webhook request body size (1MB).
@@ -17,12 +19,13 @@ const maxBodySize = 1 << 20
 
 // Mirrorer is the interface for mirror sync operations.
 type Mirrorer interface {
-	SyncByTarget(ctx context.Context, providerName, repoPath string) error
+	SyncByTarget(ctx context.Context, providerName, repoPath string, meta mirror.EventMeta) error
 }
 
 // GitLabPushEvent represents a GitLab push webhook payload.
 type GitLabPushEvent struct {
-	EventName  string `json:"event_name"`
+	EventName string `json:"event_name"`
+	UserName  string `json:"user_name"`
 	Repository struct {
 		Name string `json:"name"`
 	} `json:"repository"`
@@ -34,7 +37,13 @@ type GitLabPushEvent struct {
 
 // GitHubPushEvent represents a GitHub push webhook payload.
 type GitHubPushEvent struct {
-	Ref        string `json:"ref"`
+	Ref    string `json:"ref"`
+	Pusher struct {
+		Name string `json:"name"`
+	} `json:"pusher"`
+	Sender struct {
+		Login string `json:"login"`
+	} `json:"sender"`
 	Repository struct {
 		Name     string `json:"name"`
 		FullName string `json:"full_name"`
@@ -91,11 +100,14 @@ func (w *Webhook) GitLabHandler(rw http.ResponseWriter, r *http.Request) {
 	}
 
 	repoPath := event.Project.PathWithNamespace
-	logger := slog.With("provider", "gitlab", "repo", repoPath, "ref", event.Ref)
+	logger := slog.With("provider", "gitlab", "repo", repoPath, "ref", event.Ref, "pusher", event.UserName)
 	logger.Info("received gitlab push event")
 
+	meta := mirror.EventMeta{
+		Ref: event.Ref,
+	}
 	go func() {
-		if err := w.mirrorSvc.SyncByTarget(w.ctx, "gitlab", repoPath); err != nil {
+		if err := w.mirrorSvc.SyncByTarget(w.ctx, "gitlab", repoPath, meta); err != nil {
 			logger.Error("mirror sync failed", "error", err)
 		}
 	}()
@@ -136,11 +148,18 @@ func (w *Webhook) GitHubHandler(rw http.ResponseWriter, r *http.Request) {
 	}
 
 	repoPath := event.Repository.FullName
-	logger := slog.With("provider", "github", "repo", repoPath, "ref", event.Ref)
+	pusher := event.Pusher.Name
+	if pusher == "" {
+		pusher = event.Sender.Login
+	}
+	logger := slog.With("provider", "github", "repo", repoPath, "ref", event.Ref, "pusher", pusher)
 	logger.Info("received github push event")
 
+	meta := mirror.EventMeta{
+		Ref: event.Ref,
+	}
 	go func() {
-		if err := w.mirrorSvc.SyncByTarget(w.ctx, "github", repoPath); err != nil {
+		if err := w.mirrorSvc.SyncByTarget(w.ctx, "github", repoPath, meta); err != nil {
 			logger.Error("mirror sync failed", "error", err)
 		}
 	}()

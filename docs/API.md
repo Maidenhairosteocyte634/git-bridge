@@ -67,6 +67,7 @@ GitLab push event payload (sent automatically by GitLab):
 ```json
 {
   "event_name": "push",
+  "user_name": "somaz",
   "ref": "refs/heads/main",
   "repository": {
     "name": "my-repo"
@@ -80,7 +81,8 @@ GitLab push event payload (sent automatically by GitLab):
 | Field | Description |
 |-------|-------------|
 | `project.path_with_namespace` | Used to match against `target_path` or `source_path` in repo config |
-| `ref` | Branch or tag reference (logged) |
+| `ref` | Branch or tag reference — included in Slack notification |
+| `user_name` | The person who pushed — logged for debugging (Slack shows commit author instead) |
 
 #### Response
 
@@ -118,6 +120,12 @@ GitHub push event payload (sent automatically by GitHub):
 ```json
 {
   "ref": "refs/heads/main",
+  "pusher": {
+    "name": "somaz"
+  },
+  "sender": {
+    "login": "somaz"
+  },
   "repository": {
     "name": "my-repo",
     "full_name": "org/my-repo"
@@ -128,7 +136,9 @@ GitHub push event payload (sent automatically by GitHub):
 | Field | Description |
 |-------|-------------|
 | `repository.full_name` | Used to match against `target_path` or `source_path` in repo config |
-| `ref` | Branch or tag reference (logged) |
+| `ref` | Branch or tag reference — included in Slack notification |
+| `pusher.name` | The person who pushed — logged for debugging (Slack shows commit author instead) |
+| `sender.login` | Fallback for pusher name in logs when `pusher.name` is empty |
 
 #### Response
 
@@ -167,7 +177,8 @@ Not an HTTP endpoint. The SQS consumer polls the configured SQS queue for CodeCo
 | Field | Description |
 |-------|-------------|
 | `detail.repositoryName` | Used to match against `source_path` in repo config |
-| `detail.referenceName` | Branch or tag reference (logged) |
+| `detail.referenceName` | Branch or tag reference — included in Slack notification |
+| `detail.referenceType` | `branch` or `tag` — used to construct full ref path |
 
 #### Behavior
 

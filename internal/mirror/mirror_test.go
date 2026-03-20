@@ -25,8 +25,8 @@ type mockGitRunner struct {
 	pushErr        error
 	pushChanged    bool // when true, PushMirror reports changes were pushed
 	deleteRefErr   error
-	lastCommitInfo string
-	lastCommitErr  error
+	commitAuthor   string // return value for CommitAuthor
+	commitAuthorErr error
 }
 
 type cloneCall struct {
@@ -70,8 +70,8 @@ func (m *mockGitRunner) DeleteRef(_ context.Context, _, url, refType, refName st
 	return m.deleteRefErr
 }
 
-func (m *mockGitRunner) LastCommitInfo(_ context.Context, _ string) (string, error) {
-	return m.lastCommitInfo, m.lastCommitErr
+func (m *mockGitRunner) CommitAuthor(_ context.Context, _, _ string) (string, error) {
+	return m.commitAuthor, m.commitAuthorErr
 }
 
 // mockNotifier records sent notifications.
@@ -158,7 +158,7 @@ func TestSync_SourceToTarget(t *testing.T) {
 	notif := &mockNotifier{}
 	svc := newTestService(defaultRepos(), makeProviders(), notif, git)
 
-	err := svc.Sync(context.Background(), "my-repo")
+	err := svc.Sync(context.Background(), "my-repo", EventMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestSync_Bidirectional(t *testing.T) {
 	notif := &mockNotifier{}
 	svc := newTestService(defaultRepos(), makeProviders(), notif, git)
 
-	err := svc.Sync(context.Background(), "bidi-repo")
+	err := svc.Sync(context.Background(), "bidi-repo", EventMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestSync_DirectionNotAllowed(t *testing.T) {
 	svc := newTestService(defaultRepos(), makeProviders(), notif, git)
 
 	// reverse-repo is target-to-source only, so Sync (source-side trigger) should fail
-	err := svc.Sync(context.Background(), "team/reverse-repo")
+	err := svc.Sync(context.Background(), "team/reverse-repo", EventMeta{})
 	if err == nil {
 		t.Fatal("expected error for disallowed direction")
 	}
@@ -211,7 +211,7 @@ func TestSync_RepoNotConfigured(t *testing.T) {
 	notif := &mockNotifier{}
 	svc := newTestService(defaultRepos(), makeProviders(), notif, git)
 
-	err := svc.Sync(context.Background(), "nonexistent-repo")
+	err := svc.Sync(context.Background(), "nonexistent-repo", EventMeta{})
 	if err == nil {
 		t.Fatal("expected error for unconfigured repo")
 	}
@@ -222,7 +222,7 @@ func TestSync_CloneError(t *testing.T) {
 	notif := &mockNotifier{}
 	svc := newTestService(defaultRepos(), makeProviders(), notif, git)
 
-	err := svc.Sync(context.Background(), "my-repo")
+	err := svc.Sync(context.Background(), "my-repo", EventMeta{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -238,7 +238,7 @@ func TestSync_PushError(t *testing.T) {
 	notif := &mockNotifier{}
 	svc := newTestService(defaultRepos(), makeProviders(), notif, git)
 
-	err := svc.Sync(context.Background(), "my-repo")
+	err := svc.Sync(context.Background(), "my-repo", EventMeta{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -256,7 +256,7 @@ func TestSyncByTarget_TargetMatch(t *testing.T) {
 	svc := newTestService(defaultRepos(), makeProviders(), notif, git)
 
 	// bidi-repo: target is gitlab, target_path is team/bidi-repo, direction bidirectional
-	err := svc.SyncByTarget(context.Background(),"gitlab", "team/bidi-repo")
+	err := svc.SyncByTarget(context.Background(), "gitlab", "team/bidi-repo", EventMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestSyncByTarget_SourceMatch(t *testing.T) {
 
 	// my-repo: source is codecommit, source_path is my-repo, direction source-to-target
 	// SyncByTarget with source provider match should trigger source-to-target
-	err := svc.SyncByTarget(context.Background(),"codecommit", "my-repo")
+	err := svc.SyncByTarget(context.Background(), "codecommit", "my-repo", EventMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestSyncByTarget_DirectionNotAllowed(t *testing.T) {
 	svc := newTestService(defaultRepos(), makeProviders(), notif, git)
 
 	// my-repo is source-to-target only; target-side webhook (gitlab) should not allow target-to-source
-	err := svc.SyncByTarget(context.Background(),"gitlab", "team/my-repo")
+	err := svc.SyncByTarget(context.Background(), "gitlab", "team/my-repo", EventMeta{})
 	if err == nil {
 		t.Fatal("expected error for disallowed direction")
 	}
@@ -300,7 +300,7 @@ func TestSyncByTarget_NoMatch(t *testing.T) {
 	notif := &mockNotifier{}
 	svc := newTestService(defaultRepos(), makeProviders(), notif, git)
 
-	err := svc.SyncByTarget(context.Background(),"gitlab", "unknown/repo")
+	err := svc.SyncByTarget(context.Background(), "gitlab", "unknown/repo", EventMeta{})
 	if err == nil {
 		t.Fatal("expected error for no matching repo")
 	}
@@ -311,7 +311,7 @@ func TestSyncByTarget_CloneError(t *testing.T) {
 	notif := &mockNotifier{}
 	svc := newTestService(defaultRepos(), makeProviders(), notif, git)
 
-	err := svc.SyncByTarget(context.Background(),"gitlab", "team/bidi-repo")
+	err := svc.SyncByTarget(context.Background(), "gitlab", "team/bidi-repo", EventMeta{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -331,25 +331,26 @@ func TestDoMirror_ProviderNotFound(t *testing.T) {
 	repoCfg := config.RepoConfig{Name: "test"}
 
 	// Source provider not found
-	err := svc.doMirror(context.Background(), repoCfg, "nonexistent", "repo", "gitlab-main", "team/repo")
+	err := svc.doMirror(context.Background(), repoCfg, "nonexistent", "repo", "gitlab-main", "team/repo", EventMeta{})
 	if err == nil {
 		t.Fatal("expected error for missing source provider")
 	}
 
 	// Target provider not found
-	err = svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "repo", "nonexistent", "team/repo")
+	err = svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "repo", "nonexistent", "team/repo", EventMeta{})
 	if err == nil {
 		t.Fatal("expected error for missing target provider")
 	}
 }
 
 func TestDoMirror_SuccessNotification(t *testing.T) {
-	git := &mockGitRunner{pushChanged: true, lastCommitInfo: "somaz <somaz@example.com>"}
+	git := &mockGitRunner{pushChanged: true, commitAuthor: "somaz"}
 	notif := &mockNotifier{}
 	svc := newTestService(nil, makeProviders(), notif, git)
 
+	meta := EventMeta{Ref: "refs/heads/main"}
 	repoCfg := config.RepoConfig{Name: "test-repo"}
-	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo")
+	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo", meta)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -363,8 +364,31 @@ func TestDoMirror_SuccessNotification(t *testing.T) {
 	if notif.messages[0].Title != "Mirror Sync: test-repo" {
 		t.Errorf("unexpected title: %q", notif.messages[0].Title)
 	}
-	if !strings.Contains(notif.messages[0].Body, "Pushed by: somaz <somaz@example.com>") {
-		t.Errorf("expected notification body to contain pusher info, got %q", notif.messages[0].Body)
+	if !strings.Contains(notif.messages[0].Body, "Pushed by: somaz") {
+		t.Errorf("expected notification body to contain commit author, got %q", notif.messages[0].Body)
+	}
+	if !strings.Contains(notif.messages[0].Body, "Branch: main") {
+		t.Errorf("expected notification body to contain branch info, got %q", notif.messages[0].Body)
+	}
+}
+
+func TestDoMirror_SuccessNotification_WithTag(t *testing.T) {
+	git := &mockGitRunner{pushChanged: true, commitAuthor: "somaz"}
+	notif := &mockNotifier{}
+	svc := newTestService(nil, makeProviders(), notif, git)
+
+	meta := EventMeta{Ref: "refs/tags/v1.0.0"}
+	repoCfg := config.RepoConfig{Name: "test-repo"}
+	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo", meta)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(notif.messages) != 1 {
+		t.Fatalf("expected 1 notification, got %d", len(notif.messages))
+	}
+	if !strings.Contains(notif.messages[0].Body, "Tag: v1.0.0") {
+		t.Errorf("expected notification body to contain tag info, got %q", notif.messages[0].Body)
 	}
 }
 
@@ -447,7 +471,7 @@ func TestSyncByTarget_TargetProviderNotInMap(t *testing.T) {
 
 	// Target provider "missing" not in map → skip target match
 	// Source provider "codecommit-eu" matches → doMirror → fails because target "missing" not found
-	err := svc.SyncByTarget(context.Background(),"codecommit", "r")
+	err := svc.SyncByTarget(context.Background(), "codecommit", "r", EventMeta{})
 	if err == nil {
 		t.Fatal("expected error because target provider missing from providers map")
 	}
@@ -469,7 +493,7 @@ func TestSyncByTarget_SourceProviderNotInMap(t *testing.T) {
 	svc := newTestService(repos, providers, notif, git)
 
 	// Target matches (gitlab-main, t/r) → doMirror from "gitlab-main" to "missing" → fails
-	err := svc.SyncByTarget(context.Background(),"gitlab", "t/r")
+	err := svc.SyncByTarget(context.Background(), "gitlab", "t/r", EventMeta{})
 	if err == nil {
 		t.Fatal("expected error because source provider missing from providers map")
 	}
@@ -483,7 +507,7 @@ func TestSyncByTarget_SourceDirectionNotAllowed(t *testing.T) {
 	// direction is target-to-source, not source-to-target
 	svc := newTestService(defaultRepos(), makeProviders(), notif, git)
 
-	err := svc.SyncByTarget(context.Background(),"gitlab", "team/reverse-repo")
+	err := svc.SyncByTarget(context.Background(), "gitlab", "team/reverse-repo", EventMeta{})
 	if err == nil {
 		t.Fatal("expected error for source-side direction not allowed")
 	}
@@ -495,7 +519,7 @@ func TestSyncByTarget_TargetToSource_Success(t *testing.T) {
 	svc := newTestService(defaultRepos(), makeProviders(), notif, git)
 
 	// reverse-repo: target=github, target_path=org/reverse-repo, direction=target-to-source
-	err := svc.SyncByTarget(context.Background(),"github", "org/reverse-repo")
+	err := svc.SyncByTarget(context.Background(), "github", "org/reverse-repo", EventMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -824,25 +848,27 @@ func TestAllowsTargetToSource(t *testing.T) {
 	}
 }
 
-// --- isUpToDate tests ---
+// --- hasPorcelainChanges tests ---
 
-func TestIsUpToDate(t *testing.T) {
+func TestHasPorcelainChanges(t *testing.T) {
 	tests := []struct {
 		name   string
 		output string
 		want   bool
 	}{
-		{"empty output", "", true},
-		{"whitespace only", "  \n  ", true},
-		{"everything up-to-date", "Everything up-to-date", true},
-		{"up-to-date with newline", "Everything up-to-date\n", true},
-		{"actual push output", "To /tmp/target.git\n * [new branch]      main -> main\n", false},
-		{"forced update", "To /tmp/target.git\n + abc123...def456 main -> main (forced update)\n", false},
+		{"empty output", "", false},
+		{"whitespace only", "  \n  ", false},
+		{"up-to-date ref", "To /tmp/target.git\n=\trefs/heads/main:refs/heads/main\t[up to date]\nDone", false},
+		{"new branch", "To /tmp/target.git\n*\trefs/heads/main:refs/heads/main\t[new branch]\nDone", true},
+		{"forced update", "To /tmp/target.git\n+\trefs/heads/main:refs/heads/main\t(forced update)\nDone", true},
+		{"normal update", "To /tmp/target.git\n \trefs/heads/main:refs/heads/main\tabc123..def456\nDone", true},
+		{"mixed up-to-date and changed", "To /tmp/target.git\n=\trefs/heads/main:refs/heads/main\t[up to date]\n+\trefs/heads/dev:refs/heads/dev\t(forced)\nDone", true},
+		{"all up-to-date", "To /tmp/target.git\n=\trefs/heads/main:refs/heads/main\t[up to date]\n=\trefs/heads/dev:refs/heads/dev\t[up to date]\nDone", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isUpToDate(tt.output); got != tt.want {
-				t.Errorf("isUpToDate(%q) = %v, want %v", tt.output, got, tt.want)
+			if got := hasPorcelainChanges(tt.output); got != tt.want {
+				t.Errorf("hasPorcelainChanges(%q) = %v, want %v", tt.output, got, tt.want)
 			}
 		})
 	}
@@ -856,7 +882,7 @@ func TestDoMirror_NoChange_SkipsNotification(t *testing.T) {
 	svc := newTestService(nil, makeProviders(), notif, git)
 
 	repoCfg := config.RepoConfig{Name: "test-repo"}
-	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo")
+	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo", EventMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -871,7 +897,7 @@ func TestSync_NoChange_SkipsNotification(t *testing.T) {
 	notif := &mockNotifier{}
 	svc := newTestService(defaultRepos(), makeProviders(), notif, git)
 
-	err := svc.Sync(context.Background(), "my-repo")
+	err := svc.Sync(context.Background(), "my-repo", EventMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -886,7 +912,7 @@ func TestSyncByTarget_NoChange_SkipsNotification(t *testing.T) {
 	notif := &mockNotifier{}
 	svc := newTestService(defaultRepos(), makeProviders(), notif, git)
 
-	err := svc.SyncByTarget(context.Background(), "gitlab", "team/bidi-repo")
+	err := svc.SyncByTarget(context.Background(), "gitlab", "team/bidi-repo", EventMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -901,7 +927,7 @@ func TestSyncByTarget_WithChanges_SendsNotification(t *testing.T) {
 	notif := &mockNotifier{}
 	svc := newTestService(defaultRepos(), makeProviders(), notif, git)
 
-	err := svc.SyncByTarget(context.Background(), "gitlab", "team/bidi-repo")
+	err := svc.SyncByTarget(context.Background(), "gitlab", "team/bidi-repo", EventMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -940,38 +966,17 @@ func TestDoMirror_IncrementalFetch(t *testing.T) {
 	os.WriteFile(mirrorDir+"/HEAD", []byte("ref: refs/heads/main\n"), 0o644)
 
 	repoCfg := config.RepoConfig{Name: "test-repo"}
-	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo")
+	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo", EventMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// Should fetch, not clone
 	if len(git.fetchCalls) != 1 {
 		t.Errorf("expected 1 fetch call, got %d", len(git.fetchCalls))
 	}
 	if len(git.cloneCalls) != 0 {
 		t.Errorf("expected 0 clone calls, got %d", len(git.cloneCalls))
-	}
-}
-
-func TestDoMirror_FetchAndFallbackCloneBothFail(t *testing.T) {
-	git := &mockGitRunner{fetchErr: fmt.Errorf("fetch failed"), cloneErr: fmt.Errorf("clone failed")}
-	notif := &mockNotifier{}
-	svc := newTestService(nil, makeProviders(), notif, git)
-	svc.workDir = t.TempDir()
-
-	// Create a fake bare git dir to trigger fetch path
-	mirrorDir := svc.workDir + "/test-repo-codecommit.git"
-	os.MkdirAll(mirrorDir, 0o755)
-	os.WriteFile(mirrorDir+"/HEAD", []byte("ref: refs/heads/main\n"), 0o644)
-
-	repoCfg := config.RepoConfig{Name: "test-repo"}
-	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo")
-	if err == nil {
-		t.Fatal("expected error when both fetch and fallback clone fail")
-	}
-
-	if len(notif.messages) != 1 || notif.messages[0].Level != "error" {
-		t.Errorf("expected error notification, got %+v", notif.messages)
 	}
 }
 
@@ -987,16 +992,39 @@ func TestDoMirror_FetchFallbackToClone(t *testing.T) {
 	os.WriteFile(mirrorDir+"/HEAD", []byte("ref: refs/heads/main\n"), 0o644)
 
 	repoCfg := config.RepoConfig{Name: "test-repo"}
-	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo")
+	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo", EventMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// Should fetch first, then fallback to clone
 	if len(git.fetchCalls) != 1 {
 		t.Errorf("expected 1 fetch call, got %d", len(git.fetchCalls))
 	}
 	if len(git.cloneCalls) != 1 {
 		t.Errorf("expected 1 clone call (fallback), got %d", len(git.cloneCalls))
+	}
+}
+
+func TestDoMirror_FetchAndFallbackCloneBothFail(t *testing.T) {
+	git := &mockGitRunner{fetchErr: fmt.Errorf("fetch failed"), cloneErr: fmt.Errorf("clone failed")}
+	notif := &mockNotifier{}
+	svc := newTestService(nil, makeProviders(), notif, git)
+	svc.workDir = t.TempDir()
+
+	// Create a fake bare git dir to trigger fetch path
+	mirrorDir := svc.workDir + "/test-repo-codecommit.git"
+	os.MkdirAll(mirrorDir, 0o755)
+	os.WriteFile(mirrorDir+"/HEAD", []byte("ref: refs/heads/main\n"), 0o644)
+
+	repoCfg := config.RepoConfig{Name: "test-repo"}
+	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo", EventMeta{})
+	if err == nil {
+		t.Fatal("expected error when both fetch and fallback clone fail")
+	}
+
+	if len(notif.messages) != 1 || notif.messages[0].Level != "error" {
+		t.Errorf("expected error notification, got %+v", notif.messages)
 	}
 }
 
@@ -1006,8 +1034,9 @@ func TestDoMirror_InitialClone(t *testing.T) {
 	svc := newTestService(nil, makeProviders(), notif, git)
 	svc.workDir = t.TempDir()
 
+	// No existing mirror dir — should do full clone
 	repoCfg := config.RepoConfig{Name: "test-repo"}
-	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo")
+	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo", EventMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1021,6 +1050,7 @@ func TestDoMirror_InitialClone(t *testing.T) {
 }
 
 func TestDefaultGitRunner_FetchMirror(t *testing.T) {
+	// Create source with a commit
 	srcDir := t.TempDir()
 	runGit(t, srcDir, "init")
 	runGit(t, srcDir, "config", "user.email", "test@test.com")
@@ -1029,6 +1059,7 @@ func TestDefaultGitRunner_FetchMirror(t *testing.T) {
 	runGit(t, srcDir, "add", ".")
 	runGit(t, srcDir, "commit", "-m", "init")
 
+	// Clone mirror
 	runner := &defaultGitRunner{}
 	mirrorDir := t.TempDir() + "/mirror.git"
 	if err := runner.CloneMirror(context.Background(), srcDir, mirrorDir); err != nil {
@@ -1040,21 +1071,25 @@ func TestDefaultGitRunner_FetchMirror(t *testing.T) {
 	runGit(t, srcDir, "add", ".")
 	runGit(t, srcDir, "commit", "-m", "second")
 
+	// Fetch should pick up the new commit
 	if err := runner.FetchMirror(context.Background(), srcDir, mirrorDir); err != nil {
 		t.Fatalf("FetchMirror failed: %v", err)
 	}
 }
 
 func TestIsGitDir(t *testing.T) {
+	// Not a git dir
 	if isGitDir("/nonexistent") {
 		t.Error("expected false for nonexistent dir")
 	}
 
+	// Dir without HEAD
 	tmpDir := t.TempDir()
 	if isGitDir(tmpDir) {
 		t.Error("expected false for dir without HEAD")
 	}
 
+	// Valid bare git dir
 	os.WriteFile(tmpDir+"/HEAD", []byte("ref: refs/heads/main\n"), 0o644)
 	if !isGitDir(tmpDir) {
 		t.Error("expected true for dir with HEAD file")
@@ -1064,6 +1099,7 @@ func TestIsGitDir(t *testing.T) {
 // --- LastCommitInfo tests ---
 
 func TestDefaultGitRunner_FetchMirror_InvalidURL(t *testing.T) {
+	// Create a valid mirror dir first
 	srcDir := t.TempDir()
 	runGit(t, srcDir, "init")
 	runGit(t, srcDir, "config", "user.email", "test@test.com")
@@ -1086,6 +1122,7 @@ func TestDefaultGitRunner_FetchMirror_InvalidURL(t *testing.T) {
 
 func TestDefaultGitRunner_DeleteRef_MkdirFail(t *testing.T) {
 	runner := &defaultGitRunner{}
+	// Use a path under a file (not a directory) to trigger MkdirAll failure
 	tmpFile := t.TempDir() + "/file"
 	writeFile(t, tmpFile, "not a dir")
 
@@ -1096,6 +1133,7 @@ func TestDefaultGitRunner_DeleteRef_MkdirFail(t *testing.T) {
 }
 
 func TestDefaultGitRunner_PushMirror_TagsError(t *testing.T) {
+	// Create source with a commit and a tag
 	srcDir := t.TempDir()
 	runGit(t, srcDir, "init")
 	runGit(t, srcDir, "config", "user.email", "test@test.com")
@@ -1111,7 +1149,9 @@ func TestDefaultGitRunner_PushMirror_TagsError(t *testing.T) {
 		t.Fatalf("setup failed: %v", err)
 	}
 
+	// Push branches to valid target, but cancel context before tags
 	ctx, cancel := context.WithCancel(context.Background())
+	// We can't easily cancel between branches and tags, so just test normal path
 	defer cancel()
 
 	tgtDir := t.TempDir()
@@ -1139,56 +1179,19 @@ func TestDefaultGitRunner_CloneMirror_CleanupExistingDir(t *testing.T) {
 		t.Fatalf("CloneMirror failed: %v", err)
 	}
 
+	// stale file should be removed
 	if _, err := os.Stat(destDir + "/stale-file"); err == nil {
 		t.Error("expected stale file to be removed")
 	}
 }
 
-func TestDefaultGitRunner_LastCommitInfo(t *testing.T) {
-	srcDir := t.TempDir()
-	runGit(t, srcDir, "init")
-	runGit(t, srcDir, "config", "user.email", "somaz@example.com")
-	runGit(t, srcDir, "config", "user.name", "somaz")
-	writeFile(t, srcDir+"/file.txt", "hello")
-	runGit(t, srcDir, "add", ".")
-	runGit(t, srcDir, "commit", "-m", "init")
-
-	runner := &defaultGitRunner{}
-	info, err := runner.LastCommitInfo(context.Background(), srcDir)
-	if err != nil {
-		t.Fatalf("LastCommitInfo failed: %v", err)
-	}
-	if info != "somaz <somaz@example.com>" {
-		t.Errorf("unexpected info: %q", info)
-	}
-}
-
-func TestDefaultGitRunner_LastCommitInfo_InvalidDir(t *testing.T) {
-	runner := &defaultGitRunner{}
-	_, err := runner.LastCommitInfo(context.Background(), "/nonexistent/dir")
-	if err == nil {
-		t.Fatal("expected error for invalid dir")
-	}
-}
-
-func TestDefaultGitRunner_LastCommitInfo_EmptyRepo(t *testing.T) {
-	srcDir := t.TempDir()
-	runGit(t, srcDir, "init")
-
-	runner := &defaultGitRunner{}
-	_, err := runner.LastCommitInfo(context.Background(), srcDir)
-	if err == nil {
-		t.Fatal("expected error for empty repo with no commits")
-	}
-}
-
-func TestDoMirror_SuccessNotification_NoAuthor(t *testing.T) {
-	git := &mockGitRunner{pushChanged: true, lastCommitErr: fmt.Errorf("no commits")}
+func TestDoMirror_SuccessNotification_EmptyMeta(t *testing.T) {
+	git := &mockGitRunner{pushChanged: true}
 	notif := &mockNotifier{}
 	svc := newTestService(nil, makeProviders(), notif, git)
 
 	repoCfg := config.RepoConfig{Name: "test-repo"}
-	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo")
+	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo", EventMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1196,8 +1199,132 @@ func TestDoMirror_SuccessNotification_NoAuthor(t *testing.T) {
 	if len(notif.messages) != 1 {
 		t.Fatalf("expected 1 notification, got %d", len(notif.messages))
 	}
-	if strings.Contains(notif.messages[0].Body, "Pushed by:") {
-		t.Errorf("should not contain Pushed by when author unavailable, got %q", notif.messages[0].Body)
+	body := notif.messages[0].Body
+	if strings.Contains(body, "Pushed by:") {
+		t.Errorf("should not contain Pushed by when ref is empty, got %q", body)
+	}
+	if strings.Contains(body, "Branch:") {
+		t.Errorf("should not contain Branch when ref is empty, got %q", body)
+	}
+	if strings.Contains(body, "Tag:") {
+		t.Errorf("should not contain Tag when ref is empty, got %q", body)
+	}
+}
+
+func TestDoMirror_SuccessNotification_NoRef(t *testing.T) {
+	git := &mockGitRunner{pushChanged: true}
+	notif := &mockNotifier{}
+	svc := newTestService(nil, makeProviders(), notif, git)
+
+	repoCfg := config.RepoConfig{Name: "test-repo"}
+	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo", EventMeta{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(notif.messages) != 1 {
+		t.Fatalf("expected 1 notification, got %d", len(notif.messages))
+	}
+	body := notif.messages[0].Body
+	if strings.Contains(body, "Branch:") {
+		t.Errorf("should not contain Branch when ref is empty, got %q", body)
+	}
+	if strings.Contains(body, "Tag:") {
+		t.Errorf("should not contain Tag when ref is empty, got %q", body)
+	}
+	if strings.Contains(body, "Pushed by:") {
+		t.Errorf("should not contain Pushed by when ref is empty, got %q", body)
+	}
+}
+
+func TestDoMirror_SuccessNotification_CommitAuthorError(t *testing.T) {
+	git := &mockGitRunner{pushChanged: true, commitAuthorErr: fmt.Errorf("ref not found")}
+	notif := &mockNotifier{}
+	svc := newTestService(nil, makeProviders(), notif, git)
+
+	meta := EventMeta{Ref: "refs/heads/main"}
+	repoCfg := config.RepoConfig{Name: "test-repo"}
+	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo", meta)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body := notif.messages[0].Body
+	if strings.Contains(body, "Pushed by:") {
+		t.Errorf("should not contain Pushed by when CommitAuthor fails, got %q", body)
+	}
+	if !strings.Contains(body, "Branch: main") {
+		t.Errorf("expected Branch: main, got %q", body)
+	}
+}
+
+func TestDoMirror_SuccessNotification_BranchOnly(t *testing.T) {
+	git := &mockGitRunner{pushChanged: true, commitAuthor: "developer"}
+	notif := &mockNotifier{}
+	svc := newTestService(nil, makeProviders(), notif, git)
+
+	meta := EventMeta{Ref: "refs/heads/develop"}
+	repoCfg := config.RepoConfig{Name: "test-repo"}
+	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo", meta)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body := notif.messages[0].Body
+	if !strings.Contains(body, "Branch: develop") {
+		t.Errorf("expected Branch: develop, got %q", body)
+	}
+	if strings.Contains(body, "Tag:") {
+		t.Errorf("should not contain Tag for branch push, got %q", body)
+	}
+}
+
+func TestDoMirror_SuccessNotification_TagOnly(t *testing.T) {
+	git := &mockGitRunner{pushChanged: true, commitAuthor: "tagger"}
+	notif := &mockNotifier{}
+	svc := newTestService(nil, makeProviders(), notif, git)
+
+	meta := EventMeta{Ref: "refs/tags/v2.0.0"}
+	repoCfg := config.RepoConfig{Name: "test-repo"}
+	err := svc.doMirror(context.Background(), repoCfg, "codecommit-eu", "my-repo", "gitlab-main", "team/my-repo", meta)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body := notif.messages[0].Body
+	if !strings.Contains(body, "Tag: v2.0.0") {
+		t.Errorf("expected Tag: v2.0.0, got %q", body)
+	}
+	if strings.Contains(body, "Branch:") {
+		t.Errorf("should not contain Branch for tag push, got %q", body)
+	}
+}
+
+func TestEventMeta_RefName(t *testing.T) {
+	tests := []struct {
+		ref  string
+		want string
+	}{
+		{"refs/heads/main", "main"},
+		{"refs/heads/feature/foo", "feature/foo"},
+		{"refs/tags/v1.0.0", "v1.0.0"},
+		{"other", "other"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		m := EventMeta{Ref: tt.ref}
+		if got := m.RefName(); got != tt.want {
+			t.Errorf("EventMeta{Ref: %q}.RefName() = %q, want %q", tt.ref, got, tt.want)
+		}
+	}
+}
+
+func TestEventMeta_IsTag(t *testing.T) {
+	if !(EventMeta{Ref: "refs/tags/v1.0"}).IsTag() {
+		t.Error("expected IsTag() true for refs/tags/v1.0")
+	}
+	if (EventMeta{Ref: "refs/heads/main"}).IsTag() {
+		t.Error("expected IsTag() false for refs/heads/main")
 	}
 }
 
