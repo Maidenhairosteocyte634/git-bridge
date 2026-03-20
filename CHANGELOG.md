@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.3.0](https://github.com/somaz94/git-bridge/compare/v0.2.0...v0.3.0) (2026-03-20)
+
+### Features
+
+- sync with internal repo - commit author, porcelain push, config validation ([5b0d904](https://github.com/somaz94/git-bridge/commit/5b0d904f996df8121e82da7a696fba4b64f0df76))
+- add CODEOWNERS ([1ad31e0](https://github.com/somaz94/git-bridge/commit/1ad31e068d0d3d01847db9511155ebfb0b84bdc4))
+
+### Bug Fixes
+
+- use GITHUB_TOKEN for dependabot auto merge ([83c06dd](https://github.com/somaz94/git-bridge/commit/83c06dd83b383d48046d68a43d31c0e19a7cb87e))
+
+### Documentation
+
+- add no-push rule to CLAUDE.md ([6e640ae](https://github.com/somaz94/git-bridge/commit/6e640ae398829a344eda10b8c2ea7aab8f73f872))
+- update CONTRIBUTORS.md ([3e0b3db](https://github.com/somaz94/git-bridge/commit/3e0b3db2df82d40498be5f663f9862c27d29bb31))
+- update changelog ([48294b6](https://github.com/somaz94/git-bridge/commit/48294b69e6295abdcb72c0f7cfda951a0239c838))
+
+### Builds
+
+- **deps:** Bump the go-minor group with 4 updates (#2) ([#2](https://github.com/somaz94/git-bridge/pull/2)) ([7fda2df](https://github.com/somaz94/git-bridge/commit/7fda2dfe2ac3db9454095159089d08445229f297))
+
+### Continuous Integration
+
+- migrate gitlab-mirror workflow to multi-git-mirror action ([3ab4ce3](https://github.com/somaz94/git-bridge/commit/3ab4ce3f46d1ecf375d8dbd70179794270a3cdb5))
+
+### Contributors
+
+- somaz
+
+<br/>
+
 ## [v0.2.0](https://github.com/somaz94/git-bridge/compare/v0.1.0...v0.2.0) (2026-03-18)
 
 ### Features
